@@ -1,0 +1,104 @@
+ASTER - CHANGELOG
+
+v0.1 - Prima versione funzionante
+
+Obiettivo
+
+Realizzare il primo assistente IA locale basato su Ollama e Qwen3 8B.
+
+Funzionalità
+
+-   Integrazione con Ollama.
+-   Utilizzo del modello Qwen3 8B.
+-   Chat testuale da terminale.
+-   Prompt di sistema personalizzato.
+-   Memoria della conversazione durante la sessione.
+-   Risposte in streaming.
+-   Comando esci per terminare la sessione.
+
+Refactoring
+
+-   Separazione del prompt dal codice.
+-   Creazione del file prompt.txt.
+
+Stato
+
+Versione stabile e funzionante.
+
+------------------------------------------------------------------------
+
+v0.2 - Consolidamento dell'architettura
+
+Obiettivi
+
+Rendere Aster più affidabile prima di aggiungere nuove funzionalità.
+
+Miglioramenti
+
+-   Lettura di prompt.txt tramite percorso assoluto relativo allo
+    script.
+-   Controllo dell’esistenza di prompt.txt.
+-   Controllo del contenuto del prompt (non vuoto).
+-   Verifica della disponibilità di Ollama all’avvio.
+-   Verifica della presenza del modello configurato.
+-   Gestione pulita di Ctrl+C.
+-   Gestione degli errori durante la chat.
+-   Ripristino della cronologia dopo errori.
+-   Limite alla cronologia della sessione.
+-   Struttura del codice più modulare.
+
+Correzioni individuate
+
+-   Compatibilità con diverse versioni della libreria Ollama
+    (ollama.list() oggetto/dizionario).
+-   Miglioramento del controllo sulla cronologia (is al posto di == dove
+    opportuno).
+
+Nuove funzionalità
+
+- Creazione del launcher Aster.bat.
+- Avvio di Aster tramite doppio clic.
+- Utilizzo automatico dell'ambiente virtuale (.venv).
+- Possibilità di creare un collegamento sul desktop senza dipendere da VS Code.
+
+Note
+
+Da questa versione Aster può essere eseguito come una normale applicazione Windows tramite il launcher Aster.bat. Questo costituisce il primo passo verso la futura distribuzione come applicazione desktop (.exe).
+
+-----------------------------------------------------------------------
+
+v0.3 - Configurazione centralizzata
+
+Obiettivo
+
+Separare completamente la configurazione dalla logica del programma,
+preparando Aster ad una crescita modulare e più facilmente manutenibile.
+
+Nuove funzionalità
+
+- Introduzione del file config.json.
+- Centralizzazione della configurazione dell'assistente.
+- Lettura automatica del nome dell'assistente.
+- Lettura automatica della versione.
+- Lettura automatica del modello Ollama.
+- Lettura automatica del limite della cronologia.
+- Lettura automatica del percorso del prompt.
+- Banner iniziale aggiornato automaticamente in base alla configurazione.
+- Estione degli errori estesa al caricamento di config.json
+- chcp 65001 in Aster.bat
+
+
+Refactoring
+
+- Separazione tra logica applicativa e configurazione.
+- Eliminazione dei principali valori hardcoded dal codice.
+- Riorganizzazione dell'inizializzazione del programma.
+- Miglioramento della leggibilità della sezione di bootstrap.
+
+Stato
+
+Versione stabile e funzionante.
+
+La configurazione di Aster è ora completamente esterna al codice e
+gestita tramite config.json. Questo rappresenta il primo passo verso
+un'architettura realmente modulare.
