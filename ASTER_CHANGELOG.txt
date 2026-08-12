@@ -165,3 +165,26 @@ Limitazione nota
 Stato
 
 Versione stabile e funzionante.
+
+------------------------------------------------------------------------
+
+v0.4.1 - Gestione pulita di EOFError
+
+Correzioni
+
+- Gestione di EOFError al prompt di input. Un Ctrl+C subito dopo
+  l'interruzione di una generazione non produce più un traceback,
+  ma una chiusura pulita della sessione.
+  Lacuna preesistente dalla v0.2, non introdotta dalla v0.4.
+- Allineamento del campo version in config.json, rimasto a 0.3.1
+  durante il rilascio della v0.4.
+
+Miglioramenti
+
+- Rimozione del numero di versione da Aster.bat. La versione resta
+  centralizzata in config.json e viene mostrata dal banner Python
+  all'avvio, eliminando la necessità di aggiornarla in due punti.
+
+Stato
+
+Hotfix stabile e funzionante.

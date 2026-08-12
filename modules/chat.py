@@ -35,7 +35,7 @@ def avvia_chat(prompt: str, modello: str, max_messaggi: int) -> None:
         try:
             domanda = input("\nTu: ").strip()
 
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, EOFError):
             print("\n\nAster: Sessione interrotta. A presto, Sem.")
             break
 
