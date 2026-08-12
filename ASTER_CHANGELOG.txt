@@ -119,3 +119,49 @@ Correzioni
 Stato
 
 Hotfix stabile e funzionante.
+
+-----------------------------------------------------------------------
+
+v0.4 - Modularizzazione del progetto
+
+Obiettivo
+
+Riorganizzare l'architettura del codice senza modificare il
+comportamento del programma. Aster v0.4 funziona esattamente come
+la v0.3.1: cambia solo l'organizzazione interna.
+
+Refactoring
+
+- Creazione del package modules/.
+- modules/config.py: caricamento e validazione di config.json.
+- modules/prompt.py: caricamento e controllo del prompt.
+- modules/ollama_manager.py: controllo di Ollama e avvio dello stream.
+- modules/chat.py: ciclo conversazionale e gestione della cronologia.
+- modules/ui.py: banner e interfaccia testuale.
+- aster.py ridotto a coordinatore puro (entry point).
+- Adozione della struttura a stella: solo aster.py legge la
+  configurazione, i valori vengono passati ai moduli come parametri
+  espliciti.
+- Eliminazione di tutte le variabili global.
+- stampa_banner() spostata da avvia_chat() a main(), per rimuovere
+  la dipendenza chat.py -> ui.py.
+- Estrazione di avvia_stream() in ollama_manager.py, così tutta la
+  comunicazione con Ollama risiede in un solo modulo.
+
+Verifiche
+
+- Nessuna dipendenza circolare. Unica dipendenza fra moduli:
+  chat.py -> ollama_manager.py.
+- Test di regressione completo superato: avvio, config mancante o
+  malformata, history_limit non intero, prompt mancante, Ollama non
+  raggiungibile, modello inesistente, comando esci, Ctrl+C.
+
+Limitazione nota
+
+- EOFError non gestito dopo un'interruzione della generazione.
+  Lacuna preesistente dalla v0.2, non introdotta da questa versione.
+  Correzione pianificata per la v0.4.1.
+
+Stato
+
+Versione stabile e funzionante.

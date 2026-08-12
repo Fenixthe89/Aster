@@ -4,7 +4,7 @@ title Aster v0.3
 
 echo.
 echo ==========================================
-echo             ASTER v0.3.1
+echo             ASTER v0.4.0
 echo ==========================================
 echo.
 echo Avvio in corso...
