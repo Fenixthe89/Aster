@@ -65,6 +65,10 @@ Note
 
 Da questa versione Aster può essere eseguito come una normale applicazione Windows tramite il launcher Aster.bat. Questo costituisce il primo passo verso la futura distribuzione come applicazione desktop (.exe).
 
+Stato
+
+Versione stabile e funzionante.
+
 -----------------------------------------------------------------------
 
 v0.3 - Configurazione centralizzata
@@ -84,7 +88,7 @@ Nuove funzionalità
 - Lettura automatica del limite della cronologia.
 - Lettura automatica del percorso del prompt.
 - Banner iniziale aggiornato automaticamente in base alla configurazione.
-- Estione degli errori estesa al caricamento di config.json
+- Gestione degli errori estesa al caricamento di config.json
 - chcp 65001 in Aster.bat
 
 
@@ -102,3 +106,16 @@ Versione stabile e funzionante.
 La configurazione di Aster è ora completamente esterna al codice e
 gestita tramite config.json. Questo rappresenta il primo passo verso
 un'architettura realmente modulare.
+
+-----------------------------------------------------------------------
+ 
+v0.3.1 - Validazione della configurazione
+
+Correzioni
+- Validazione di chat.history_limit come numero intero.
+- Un valore di tipo errato viene ora intercettato all'avvio,
+  invece di causare un errore durante la conversazione.
+
+Stato
+
+Hotfix stabile e funzionante.

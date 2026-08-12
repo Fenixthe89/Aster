@@ -15,3 +15,7 @@ logs/
 # Windows
 Thumbs.db
 Desktop.ini
+
+# Documenti di lavoro e coordinamento (solo locali)
+ASTER_STATUS_PER_CLAUDE_*.txt
+ASTER_ALLINEAMENTO_REVISIONE_*.txt

@@ -234,15 +234,16 @@ def main() -> None:
         VERSIONE = config["assistant"]["version"]
 
         MODELLO = config["ollama"]["model"]
-        
-	MAX_MESSAGGI = config["chat"]["history_limit"]
-	if not isinstance(MAX_MESSAGGI, int):
-	raise TypeError(
-        "Il campo 'chat.history_limit' in config.json deve essere un numero intero."
-    )
-     
-   PROMPT_FILE = BASE_DIR / config["files"]["prompt"]
 
+        MAX_MESSAGGI = config["chat"]["history_limit"]
+        if not isinstance(MAX_MESSAGGI, int):
+            raise TypeError(
+                "Il campo 'chat.history_limit' in config.json deve essere "
+                "un numero intero."
+            )
+
+        PROMPT_FILE = BASE_DIR / config["files"]["prompt"]
+        
         prompt = carica_prompt()
 
         print("Controllo connessione con Ollama...")
