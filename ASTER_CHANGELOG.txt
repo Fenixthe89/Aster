@@ -215,3 +215,93 @@ senza introdurre nuove funzionalità.
 Stato
 
 Release di manutenzione.
+
+------------------------------------------------------------------------
+
+v0.5.0 - Storage della memoria persistente
+
+Obiettivo
+
+Introdurre l'infrastruttura di base per la memoria persistente di Aster,
+senza ancora utilizzare i ricordi all'interno della conversazione.
+
+Nuove funzionalità
+
+- Creazione del modulo modules/memory.py dedicato alla gestione dello storage
+  della memoria persistente.
+- Introduzione dello schema memoria versione 1:
+
+  {
+      "meta": {
+          "schema_version": 1
+      },
+      "memories": []
+  }
+
+- Creazione automatica della cartella data/ e del file data/memory.json
+  alla prima esecuzione.
+- Percorso della memoria centralizzato in config.json.
+- Esclusione della cartella data/ da Git.
+- Validazione della struttura generale dell'archivio memoria.
+- Rifiuto di schema_version non interi, inclusi valori booleani.
+- Rifiuto di versioni dello schema non supportate.
+- Introduzione di memory.tmp per la scrittura sicura della nuova memoria.
+- Introduzione di memory.backup.json come ultima versione valida precedente.
+- Introduzione di memory.backup.tmp per aggiornare in sicurezza il backup.
+- Utilizzo di os.replace() per la sostituzione atomica dei file principali.
+- Validazione dei file temporanei prima della sostituzione.
+- Il backup non viene creato vuoto alla prima inizializzazione.
+
+Modalità della memoria
+
+- normale:
+  memory.json è disponibile e valido.
+
+- sola_lettura:
+  la memoria principale non è utilizzabile o manca, ma esiste un backup
+  valido. Il backup viene caricato senza modificare i file esistenti.
+
+- disabilitata:
+  né la memoria principale né il backup sono utilizzabili. Aster continua
+  comunque a funzionare senza memoria persistente.
+
+Protezione dei dati
+
+- Un memory.json corrotto non viene mai sovrascritto automaticamente.
+- Nessun ripristino distruttivo viene eseguito automaticamente.
+- Se memory.json è corrotto, i nuovi salvataggi vengono bloccati.
+- Se memory.json manca ma esiste un backup, i nuovi salvataggi vengono
+  bloccati fino a un ripristino esplicito.
+- Se memory.json manca ma esiste un backup valido, Aster utilizza il backup
+  in sola lettura invece di creare una nuova memoria vuota.
+- Se main e backup sono entrambi inutilizzabili, Aster continua senza memoria
+  persistente e preserva i file esistenti.
+
+Integrazione
+
+- aster.py inizializza lo storage della memoria durante il bootstrap.
+- Eventuali problemi della memoria vengono comunicati all'utente.
+- modules/chat.py non riceve ancora la memoria.
+- Nessun ricordo viene ancora estratto, salvato o utilizzato nella chat.
+
+Test e correzioni
+
+- Testata la prima inizializzazione senza file esistenti.
+- Testato il caricamento di memory.json già valido.
+- Testata la creazione del backup della versione precedente.
+- Testato memory.json corrotto con backup valido.
+- Testati memory.json e backup entrambi corrotti.
+- Testato main mancante con backup valido.
+- Testato main mancante con backup corrotto.
+- Testati JSON sintatticamente validi ma con struttura o schema incompatibili.
+- Testato il blocco dei salvataggi in condizioni di recovery.
+- Testata l'assenza di file temporanei dopo operazioni riuscite.
+- Testata l'esclusione di data/ da Git.
+- Test di regressione reale tramite Aster.bat superato.
+- Durante i test è stato corretto un UnboundLocalError nella gestione
+  dell'errore della memoria principale.
+
+Stato
+
+Punto A della memoria persistente completato.
+Versione stabile dopo test e review finale.

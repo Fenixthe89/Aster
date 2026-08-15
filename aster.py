@@ -12,6 +12,8 @@ from modules.ui import stampa_banner
 
 from modules.chat import avvia_chat
 
+from modules.memory import inizializza_memoria
+
 # ---------------------------------------------------------
 # PERCORSI DEL PROGETTO
 # ---------------------------------------------------------
@@ -38,6 +40,9 @@ def main() -> None:
         percorso_prompt = BASE_DIR / config["files"]["prompt"]
         prompt = carica_prompt(percorso_prompt)
 
+        percorso_memoria = BASE_DIR / config["files"]["memory"]
+        stato_memoria = inizializza_memoria(percorso_memoria)
+
         print("Controllo connessione con Ollama...")
         controlla_ollama(modello)
 
@@ -55,6 +60,10 @@ def main() -> None:
         return
 
     stampa_banner(nome_assistente, versione, modello)
+
+    if stato_memoria.messaggio:
+        print(f"\nMemoria: {stato_memoria.messaggio}")
+
     avvia_chat(prompt, modello, max_messaggi)
 
 if __name__ == "__main__":
