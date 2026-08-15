@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Aster v0.3
+title Aster
 
 echo.
 echo ==========================================

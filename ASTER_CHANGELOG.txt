@@ -188,3 +188,30 @@ Miglioramenti
 Stato
 
 Hotfix stabile e funzionante.
+
+------------------------------------------------------------------------
+
+v0.4.2 - Pulizia release
+
+Obiettivo
+
+Correggere alcune incongruenze residue della release v0.4.1 senza
+modificare il comportamento o l'architettura di Aster.
+
+Correzioni
+
+- Rimosso il vecchio numero di versione hardcoded dal titolo di Aster.bat:
+  "title Aster v0.3" è stato sostituito con "title Aster".
+- Aggiornata la versione dell'assistente a 0.4.2 in config.json.
+- Aggiornato .gitignore per escludere anche ASTER_STATUS_PER_CLAUDE.txt.
+
+Note
+
+La v0.4.1 aveva già centralizzato la versione mostrata dal banner Python
+in config.json, ma Aster.bat conteneva ancora il vecchio titolo
+"Aster v0.3". La v0.4.2 completa quindi l'allineamento della versione
+senza introdurre nuove funzionalità.
+
+Stato
+
+Release di manutenzione.
