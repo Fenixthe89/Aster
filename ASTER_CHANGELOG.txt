@@ -305,3 +305,130 @@ Stato
 
 Punto A della memoria persistente completato.
 Versione stabile dopo test e review finale.
+
+---
+
+v0.5.1 - Identità e gestione dei ricordi
+
+Obiettivo
+
+Estendere l'infrastruttura della memoria persistente introdotta nella
+v0.5.0, assegnando a ogni ricordo un'identità stabile e introducendo
+le operazioni necessarie per crearlo, modificarlo, eliminarlo e
+ripristinarlo in sicurezza.
+
+Schema memoria
+
+* Aggiornato lo schema della memoria dalla versione 1 alla versione 2.
+* Introdotto meta.next_memory_id come contatore degli ID.
+* Gli ID sono interi positivi, univoci, stabili e non vengono riciclati
+  dopo la cancellazione.
+* next_memory_id deve essere sempre maggiore di tutti gli ID presenti.
+* Introdotta la migrazione controllata dallo schema 1 allo schema 2.
+* La migrazione automatica è consentita solo per archivi v1 senza ricordi,
+  evitando di interpretare o modificare automaticamente dati con struttura
+  non ancora definita.
+* La migrazione viene persistita tramite il normale percorso di scrittura
+  sicura e la precedente versione v1 viene conservata nel backup.
+
+Struttura dei ricordi
+
+Ogni ricordo contiene:
+
+* id;
+* content;
+* created_at;
+* updated_at.
+
+I timestamp utilizzano il formato ISO 8601 con timezone locale.
+
+Validazione
+
+* Validazione della struttura di ogni singolo ricordo.
+* Rifiuto di ID non interi, booleani o minori di 1.
+* Rifiuto di contenuti vuoti o non validi.
+* Controllo degli ID duplicati nell'archivio.
+* Controllo della coerenza fra gli ID esistenti e next_memory_id.
+
+Gestione dei ricordi
+
+* Introduzione della creazione di nuovi ricordi con ID automatico.
+* Incremento automatico di next_memory_id dopo la creazione.
+* Introduzione della modifica di un ricordo esistente.
+* created_at viene preservato durante una modifica.
+* updated_at viene aggiornato automaticamente.
+* Le funzioni di creazione e modifica restituiscono copie dei ricordi,
+  evitando aliasing con gli oggetti conservati nell'archivio in memoria.
+
+Cestino
+
+* Introduzione di un archivio separato per i ricordi eliminati.
+* Struttura prevista: deleted_memories.json.
+* Backup separato previsto: deleted_memories.backup.json.
+* I ricordi eliminati mantengono il proprio ID originale.
+* Aggiunto deleted_at per registrare il momento della cancellazione.
+* Il cestino utilizza le stesse garanzie di scrittura sicura della memoria
+  principale: validazione, file temporaneo, backup e sostituzione atomica.
+
+Cancellazione sicura
+
+* Un ricordo viene salvato nel cestino prima di essere rimosso dalla
+  memoria attiva.
+* In caso di interruzione durante l'operazione viene preferita una
+  duplicazione temporanea alla perdita del dato.
+* Supportato il retry dopo una cancellazione interrotta.
+* Un retry non crea duplicati nel cestino.
+* Se lo stesso ID contiene dati differenti, l'operazione viene bloccata
+  come conflitto invece di scegliere automaticamente una versione.
+
+Ripristino sicuro
+
+* Un ricordo viene salvato nella memoria attiva prima di essere rimosso
+  dal cestino.
+* Supportato il retry dopo un ripristino interrotto.
+* Un retry non duplica il ricordo nella memoria attiva.
+* In presenza dello stesso ID con dati differenti, il ripristino viene
+  bloccato come conflitto.
+* Il ripristino preserva l'invariante di next_memory_id anche in scenari
+  di recovery anomali.
+
+Correzioni dopo review
+
+* Corretta la migrazione v1 -> v2 durante inizializza_memoria():
+  la migrazione viene ora persistita sul disco solo quando il file
+  effettivamente caricato utilizza ancora lo schema 1.
+* Evitate scritture e backup inutili agli avvii successivi con archivio
+  già in schema 2.
+* Eliminato l'aliasing nei valori restituiti da crea_ricordo() e
+  modifica_ricordo() tramite copie indipendenti dei dict.
+
+Test
+
+* Testata la migrazione v1 -> v2 in memoria e su disco.
+* Verificata la conservazione della v1 precedente nel backup.
+* Testata la validazione degli ID duplicati.
+* Testate creazione e modifica dei ricordi.
+* Verificata la corretta gestione di created_at e updated_at.
+* Testato il salvataggio sicuro del cestino e del relativo backup.
+* Testata la cancellazione normale.
+* Testato il retry dopo cancellazione interrotta.
+* Testato il ripristino normale.
+* Testato il retry dopo ripristino interrotto.
+* Testato il blocco dei conflitti fra ricordi con stesso ID e dati differenti.
+* Testato il mantenimento dell'invariante next_memory_id.
+* Testato il rifiuto dei booleani come ID.
+* Testata l'assenza di aliasing dopo creazione e modifica.
+* Compilazione di modules/memory.py verificata con py_compile.
+* Review indipendente finale completata senza bug bloccanti.
+* Batteria completa di regressione rieseguita con esito positivo.
+
+Integrazione
+
+* Tutto il Punto B resta isolato in modules/memory.py.
+* La memoria non è ancora collegata al contesto del modello o alla chat.
+* Nessun salvataggio automatico viene deciso dal modello.
+
+Stato
+
+Punto B della memoria persistente completato.
+Versione approvata dopo test e review indipendente finale.
