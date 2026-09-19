@@ -159,6 +159,54 @@ def modifica_ricordo(memoria: dict, memory_id: int, nuovo_content: str) -> dict:
         f"Nessun ricordo trovato con ID {memory_id}."
     )
 
+def cerca_memoria(
+    memoria: dict,
+    query: str,
+    limite: int = 5,
+) -> dict:
+    """
+    Cerca ricordi nella memoria attiva tramite confronto testuale semplice.
+
+    La ricerca ignora maiuscole/minuscole e normalizza gli spazi.
+    Restituisce al massimo il numero di risultati indicato da limite.
+    """
+
+    valida_archivio(memoria)
+
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError(
+            "La query di ricerca deve essere una stringa non vuota."
+        )
+
+    if type(limite) is not int or limite < 1:
+        raise ValueError(
+            "Il limite dei risultati deve essere un numero intero "
+            "maggiore o uguale a 1."
+        )
+
+    query_normalizzata = " ".join(
+        query.casefold().split()
+    )
+
+    corrispondenze = []
+
+    for ricordo in memoria["memories"]:
+        content_normalizzato = " ".join(
+            ricordo["content"].casefold().split()
+        )
+
+        if query_normalizzata in content_normalizzato:
+            corrispondenze.append(ricordo.copy())
+
+    risultati = corrispondenze[:limite]
+
+    return {
+        "results": risultati,
+        "returned": len(risultati),
+        "total_matches": len(corrispondenze),
+        "has_more": len(corrispondenze) > len(risultati),
+    }
+
 def valida_ricordo(ricordo: object) -> None:
     """
     Verifica che un singolo ricordo rispetti lo schema previsto.

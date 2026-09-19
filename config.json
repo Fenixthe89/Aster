@@ -14,6 +14,10 @@
         "stream": true
     },
 
+    "memory": {
+        "search_max_results": 5
+    },
+
     "files": {
         "prompt": "prompt.txt",
         "memory": "data/memory.json"

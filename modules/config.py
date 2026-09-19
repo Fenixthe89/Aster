@@ -30,4 +30,18 @@ def carica_config(config_file: Path) -> dict:
             "un numero intero."
         )
 
+    search_max_results = config["memory"]["search_max_results"]
+
+    if type(search_max_results) is not int:
+        raise TypeError(
+            "Il campo 'memory.search_max_results' in config.json "
+            "deve essere un numero intero."
+        )
+
+    if search_max_results < 1:
+        raise ValueError(
+            "Il campo 'memory.search_max_results' in config.json "
+            "deve essere maggiore o uguale a 1."
+        )
+
     return config
