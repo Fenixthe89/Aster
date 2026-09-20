@@ -1,5 +1,6 @@
 """Contratto tra il modello LLM e il sistema di memoria di Aster."""
 
+import re
 from pathlib import Path
 
 from modules.memory import (
@@ -219,6 +220,33 @@ TOOLS_MEMORIA = [
             },
         },
     },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "elimina_memoria_per_query",
+            "description": (
+                "Cerca il ricordo da eliminare quando l'utente "
+                "non ha fornito un ID esplicito. "
+                "Se esiste un solo candidato prepara la conferma; "
+                "se ne esistono più di uno richiede la selezione."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Testo da cercare nei ricordi per identificare "
+                            "il ricordo che l'utente vuole eliminare."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+
     {
         "type": "function",
         "function": {
@@ -328,6 +356,174 @@ def _trova_ricordo_eliminato_per_id(
 
     return None
 
+def prepara_selezione_memoria(
+    *,
+    operation: str,
+    candidates: list[dict],
+    stato_sessione: MemorySessionState,
+) -> dict:
+    """
+    Crea un pending di selezione quando più ricordi
+    possono essere il target della stessa operazione.
+    """
+
+    if operation != "delete":
+        return crea_risultato_tool(
+            ok=False,
+            operation=operation,
+            status="validation_error",
+            error=(
+                "La selezione senza ID è supportata "
+                "solo per l'eliminazione in questa fase."
+            ),
+        )
+
+    if stato_sessione.pending_action is not None:
+        pending_corrente = stato_sessione.pending_action
+
+        return crea_risultato_tool(
+            ok=False,
+            operation=pending_corrente.operation,
+            status="conflict",
+            memory_id=pending_corrente.target_id,
+            error=(
+                "Esiste già un'operazione di memoria in attesa. "
+                "Confermare o annullare il pending corrente "
+                "prima di iniziarne uno nuovo."
+            ),
+        )
+
+    if not isinstance(candidates, list) or len(candidates) < 2:
+        return crea_risultato_tool(
+            ok=False,
+            operation=operation,
+            status="validation_error",
+            error=(
+                "Servono almeno due candidati validi "
+                "per creare un pending di selezione."
+            ),
+        )
+
+    candidati_validi = []
+    id_visti = set()
+
+    for candidato in candidates:
+        if not isinstance(candidato, dict):
+            return crea_risultato_tool(
+                ok=False,
+                operation=operation,
+                status="validation_error",
+                error="Formato candidato non valido.",
+            )
+
+        memory_id = candidato.get("id")
+        content = candidato.get("content")
+
+        if (
+            type(memory_id) is not int
+            or memory_id < 1
+            or not isinstance(content, str)
+            or not content.strip()
+        ):
+            return crea_risultato_tool(
+                ok=False,
+                operation=operation,
+                status="validation_error",
+                error="Candidato memoria non valido.",
+            )
+
+        if memory_id in id_visti:
+            return crea_risultato_tool(
+                ok=False,
+                operation=operation,
+                status="validation_error",
+                error="ID candidato duplicato.",
+            )
+
+        id_visti.add(memory_id)
+
+        candidati_validi.append(
+            {
+                "id": memory_id,
+                "content": content,
+            }
+        )
+
+    imposta_pending(
+        stato_sessione,
+        PendingAction(
+            operation=operation,
+            phase="selection",
+            candidates=candidati_validi,
+        ),
+    )
+
+    return crea_risultato_tool(
+        ok=False,
+        operation=operation,
+        status="pending_selection",
+        candidates=candidati_validi,
+        source="persistent_memory",
+    )
+
+def _genera_query_eliminazione(query: str) -> list[str]:
+    """
+    Genera fallback conservativi per una richiesta
+    di eliminazione senza ID.
+    """
+
+    parole = re.findall(
+        r"[a-zA-ZÀ-ÿ0-9_+-]+",
+        query.casefold(),
+    )
+
+    stopword = {
+        "il",
+        "lo",
+        "la",
+        "i",
+        "gli",
+        "le",
+        "un",
+        "uno",
+        "una",
+        "ricordo",
+        "ricordi",
+        "memoria",
+        "elimina",
+        "eliminare",
+        "cancella",
+        "cancellare",
+        "su",
+        "di",
+        "del",
+        "della",
+        "dei",
+        "delle",
+        "per",
+        "che",
+        "quello",
+        "quella",
+    }
+
+    significative = [
+        parola
+        for parola in parole
+        if parola not in stopword
+        and len(parola) >= 4
+    ]
+
+    query_fallback = []
+
+    for indice in range(len(significative) - 1):
+        query_fallback.append(
+            f"{significative[indice]} "
+            f"{significative[indice + 1]}"
+        )
+
+    query_fallback.extend(significative)
+
+    return query_fallback
 
 def esegui_tool_memoria(
     *,
@@ -618,6 +814,90 @@ def esegui_tool_memoria(
             memory_id=memory_id,
             before=ricordo["content"],
             after=new_content.strip(),
+        )
+
+    if nome_tool == "elimina_memoria_per_query":
+        query = argomenti.get("query")
+
+        if stato_memoria.modalita == MODALITA_DISABILITATA:
+            return crea_risultato_tool(
+                ok=False,
+                operation="delete",
+                status="blocked_disabled",
+                error="La memoria persistente è disabilitata.",
+            )
+
+        if stato_memoria.modalita == MODALITA_SOLA_LETTURA:
+            return crea_risultato_tool(
+                ok=False,
+                operation="delete",
+                status="blocked_readonly",
+                error="La memoria è disponibile solo in lettura.",
+            )
+
+        try:
+            memoria = carica_archivio(percorso_memoria)
+
+            risultato = cerca_memoria(
+                memoria,
+                query,
+                limite=max(limite_ricerca, 2),
+            )
+
+            if risultato["total_matches"] == 0:
+                for query_fallback in _genera_query_eliminazione(query):
+                    risultato_fallback = cerca_memoria(
+                        memoria,
+                        query_fallback,
+                        limite=max(limite_ricerca, 2),
+                    )
+
+                    if risultato_fallback["total_matches"] > 0:
+                        risultato = risultato_fallback
+                        break
+
+        except (TypeError, ValueError) as errore:
+            return crea_risultato_tool(
+                ok=False,
+                operation="delete",
+                status="validation_error",
+                error=str(errore),
+            )
+
+        except OSError as errore:
+            return crea_risultato_tool(
+                ok=False,
+                operation="delete",
+                status="tool_error",
+                error=str(errore),
+            )
+
+        candidati = risultato["results"]
+        total_matches = risultato["total_matches"]
+        if total_matches == 0:
+            return crea_risultato_tool(
+                ok=False,
+                operation="delete",
+                status="not_found",
+                error="Nessun ricordo compatibile trovato.",
+            )
+
+        if total_matches == 1:
+            return esegui_tool_memoria(
+                nome_tool="elimina_memoria",
+                argomenti={
+                    "memory_id": candidati[0]["id"],
+                },
+                stato_memoria=stato_memoria,
+                stato_sessione=stato_sessione,
+                percorso_memoria=percorso_memoria,
+                limite_ricerca=limite_ricerca,
+            )
+
+        return prepara_selezione_memoria(
+            operation="delete",
+            candidates=candidati,
+            stato_sessione=stato_sessione,
         )
 
     if nome_tool == "elimina_memoria":

@@ -78,6 +78,50 @@ def sembra_domanda_memoria(domanda: str) -> bool:
         )
     )
 
+def sembra_eliminazione_memoria_senza_id(domanda: str) -> bool:
+    """
+    Riconosce una richiesta esplicita di eliminazione
+    di un ricordo quando l'utente non fornisce un ID.
+    """
+
+    testo = " ".join(
+        domanda.casefold().split()
+    )
+
+    verbi_eliminazione = (
+        "elimina",
+        "eliminare",
+        "cancella",
+        "cancellare",
+    )
+
+    riferimenti_memoria = (
+        "ricordo",
+        "ricordi",
+        "memoria",
+    )
+
+    ha_verbo = any(
+        verbo in testo
+        for verbo in verbi_eliminazione
+    )
+
+    parla_di_memoria = any(
+        riferimento in testo
+        for riferimento in riferimenti_memoria
+    )
+
+    ha_id_esplicito = re.search(
+        r"\bid\s*[:#]?\s*\d+\b",
+        testo,
+    ) is not None
+
+    return (
+        ha_verbo
+        and parla_di_memoria
+        and not ha_id_esplicito
+    )
+
 def genera_query_memoria(domanda: str) -> list[str]:
     """
     Estrae query semplici e conservative dalla domanda
@@ -341,6 +385,65 @@ def avvia_chat(
             # -------------------------------------------------
 
             if not tool_calls:
+                
+                if sembra_eliminazione_memoria_senza_id(domanda):
+                    risultato_memoria = esegui_tool_memoria(
+                        nome_tool="elimina_memoria_per_query",
+                        argomenti={"query": domanda},
+                        stato_memoria=stato_memoria,
+                        stato_sessione=stato_sessione,
+                        percorso_memoria=percorso_memoria,
+                        limite_ricerca=limite_ricerca,
+                    )
+
+                    messaggi_memoria = list(messaggi)
+
+                    messaggi_memoria.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "RISULTATO OPERAZIONE MEMORIA "
+                                "ESEGUITA DA PYTHON:\n"
+                                + json.dumps(
+                                    risultato_memoria,
+                                    ensure_ascii=False,
+                                )
+                                + "\n"
+                                "Python è la fonte di verità. "
+                                "Rispondi esclusivamente in base "
+                                "a questo risultato."
+                            ),
+                        }
+                    )
+
+                    risposta_memoria = esegui_risposta_finale(
+                        modello,
+                        messaggi_memoria,
+                        host_ollama,
+                    )
+
+                    risposta_completa = raccogli_risposta_finale(
+                        risposta_memoria
+                    )
+
+                    print(
+                        f"\nAster: {risposta_completa}"
+                    )
+
+                    messaggi.append(
+                        {
+                            "role": "assistant",
+                            "content": risposta_completa,
+                        }
+                    )
+
+                    limita_cronologia(
+                        messaggi,
+                        max_messaggi,
+                    )
+
+                    continue
+
                 if sembra_domanda_memoria(domanda):
                     risultato_memoria = cerca_memoria_fallback(
                         domanda,

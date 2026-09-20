@@ -117,6 +117,13 @@ Devi gestire il pending esistente tramite gestisci_pending_memoria.
 
 Se esiste già un'operazione di memoria in attesa, non iniziarne un'altra prima che quella corrente sia confermata o annullata.
 
+Se l'utente chiede di eliminare un ricordo senza fornire un ID esplicito,
+non scegliere e non inventare un ID.
+
+Usa elimina_memoria_per_query con una query ricavata dalla richiesta dell'utente.
+
+Se il tool restituisce pending_selection,
+mostra i candidati restituiti e chiedi all'utente quale ID vuole selezionare.
 
 # CESTINO ED ELIMINAZIONE
 
