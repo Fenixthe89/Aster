@@ -59,6 +59,7 @@ def crea_risultato_tool(
     before: str | None = None,
     after: str | None = None,
     candidates: list[dict] | None = None,
+    source: str | None = None,
 ) -> dict:
     """
     Costruisce il risultato strutturato restituito da Python al modello.
@@ -116,6 +117,15 @@ def crea_risultato_tool(
 
     if candidates is not None:
         risultato["candidates"] = candidates
+
+    if source is not None:
+
+        if source != "persistent_memory":
+            raise ValueError(
+                f"Source memoria non supportata: {source}."
+            )
+
+        risultato["source"] = source
 
     return risultato
 
@@ -385,6 +395,7 @@ def esegui_tool_memoria(
             ok=True,
             operation="search",
             status="searched",
+            source="persistent_memory",
             results=risultato["results"],
             returned=risultato["returned"],
             total_matches=risultato["total_matches"],

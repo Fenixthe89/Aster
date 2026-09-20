@@ -1,7 +1,244 @@
 """Ciclo conversazionale e gestione della cronologia."""
+import json
+import re
+from pathlib import Path
 
-from modules.ollama_manager import avvia_stream
+from modules.memory import StatoMemoria
+from modules.memory_session import MemorySessionState
+from modules.memory_tools import (
+    TOOLS_MEMORIA,
+    esegui_tool_memoria,
+)
+from modules.ollama_manager import (
+    esegui_risposta_finale,
+    esegui_turno_con_tools,
+)
 
+TOOLS_RICERCA_MEMORIA = [
+    tool
+    for tool in TOOLS_MEMORIA
+    if tool["function"]["name"] == "cerca_memoria"
+]
+
+
+def sembra_domanda_memoria(domanda: str) -> bool:
+    """
+    Riconosce in modo conservativo domande che potrebbero
+    riguardare informazioni personali già memorizzate.
+    """
+
+    testo = " ".join(
+        domanda.casefold().split()
+    )
+
+    indicatori_forti = (
+        "ti ricordi",
+        "ricordi che",
+        "memoria",
+        "quel ricordo",
+        "che id ha",
+        "quale id",
+        "cosa avevo deciso",
+        "cosa avevamo deciso",
+        "avevo scelto",
+        "avevamo scelto",
+    )
+
+    if any(
+        indicatore in testo
+        for indicatore in indicatori_forti
+    ):
+        return True
+
+    interrogativi = (
+        "che ",
+        "quale ",
+        "qual ",
+        "cosa ",
+    )
+
+    indicatori_personali = (
+        " mio ",
+        " mia ",
+        " miei ",
+        " mie ",
+        " preferisco ",
+        " progetto aster",
+        " ho deciso ",
+        " abbiamo deciso ",
+    )
+
+    testo_spaziato = f" {testo} "
+
+    return (
+        testo.startswith(interrogativi)
+        and any(
+            indicatore in testo_spaziato
+            for indicatore in indicatori_personali
+        )
+    )
+
+def genera_query_memoria(domanda: str) -> list[str]:
+    """
+    Estrae query semplici e conservative dalla domanda
+    per il fallback della ricerca memoria.
+    """
+
+    parole = re.findall(
+        r"[a-zA-ZÀ-ÿ0-9_+-]+",
+        domanda.casefold(),
+    )
+
+    stopword = {
+        "che",
+        "chi",
+        "cosa",
+        "come",
+        "dove",
+        "quando",
+        "quale",
+        "quali",
+        "qual",
+        "uso",
+        "usi",
+        "usa",
+        "usare",
+        "per",
+        "con",
+        "del",
+        "della",
+        "dei",
+        "delle",
+        "nel",
+        "nella",
+        "nei",
+        "nelle",
+        "il",
+        "lo",
+        "la",
+        "i",
+        "gli",
+        "le",
+        "un",
+        "uno",
+        "una",
+        "mio",
+        "mia",
+        "miei",
+        "mie",
+    }
+
+    significative = [
+        parola
+        for parola in parole
+        if parola not in stopword
+        and len(parola) >= 4
+    ]
+
+    query = []
+
+    # Prima proviamo coppie specifiche:
+    # "progetto aster", "sistema operativo", ecc.
+    for indice in range(len(significative) - 1):
+        query.append(
+            f"{significative[indice]} "
+            f"{significative[indice + 1]}"
+        )
+
+    # Poi singole parole.
+    query.extend(significative)
+
+    return query
+
+def cerca_memoria_fallback(
+    domanda: str,
+    stato_memoria: StatoMemoria,
+    stato_sessione: MemorySessionState,
+    percorso_memoria: Path,
+    limite_ricerca: int,
+) -> dict | None:
+    """
+    Prova query progressivamente più semplici finché
+    trova almeno un ricordo pertinente.
+    """
+
+    for query in genera_query_memoria(domanda):
+        risultato = esegui_tool_memoria(
+            nome_tool="cerca_memoria",
+            argomenti={"query": query},
+            stato_memoria=stato_memoria,
+            stato_sessione=stato_sessione,
+            percorso_memoria=percorso_memoria,
+            limite_ricerca=limite_ricerca,
+        )
+
+        if (
+            risultato.get("status") == "searched"
+            and risultato.get("returned", 0) > 0
+        ):
+            return risultato
+
+    return None
+
+def pulisci_testo_modello(testo: str) -> str:
+    """
+    Rimuove eventuale reasoning <think> sfuggito
+    dentro message.content.
+    """
+
+    if not testo:
+        return ""
+
+    pulito = re.sub(
+        r"<think\b[^>]*>.*?</think\s*>",
+        "",
+        testo,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # Caso difensivo osservato con alcuni modelli:
+    # reasoning senza tag iniziale ma con </think>.
+    minuscolo = pulito.casefold()
+    chiusura = "</think>"
+
+    if chiusura in minuscolo:
+        posizione = minuscolo.rfind(chiusura)
+
+        pulito = pulito[
+            posizione + len(chiusura):
+        ]
+
+    # Se rimane un <think> aperto senza chiusura,
+    # non mostriamo ciò che segue.
+    apertura = re.search(
+        r"<think\b[^>]*>",
+        pulito,
+        flags=re.IGNORECASE,
+    )
+
+    if apertura is not None:
+        pulito = pulito[:apertura.start()]
+
+    return pulito.strip()
+
+
+def raccogli_risposta_finale(stream) -> str:
+    """
+    Bufferizza completamente la risposta finale
+    prima di mostrarla.
+    """
+
+    parti = []
+
+    for parte in stream:
+        contenuto = parte.message.content or ""
+
+        if contenuto:
+            parti.append(contenuto)
+
+    return pulisci_testo_modello(
+        "".join(parti)
+    )
 
 def limita_cronologia(
     messaggi: list[dict[str, str]],
@@ -21,7 +258,15 @@ def limita_cronologia(
     messaggi[:] = [messaggio_sistema, *conversazione]
 
 
-def avvia_chat(prompt: str, modello: str, max_messaggi: int) -> None:
+def avvia_chat(
+    prompt: str,
+    modello: str,
+    max_messaggi: int,
+    host_ollama: str,
+    stato_memoria: StatoMemoria,
+    percorso_memoria: Path,
+    limite_ricerca: int,
+) -> None:
     """Avvia la conversazione interattiva con Aster."""
 
     messaggi = [
@@ -30,6 +275,8 @@ def avvia_chat(prompt: str, modello: str, max_messaggi: int) -> None:
             "content": prompt,
         }
     ]
+
+    stato_sessione = MemorySessionState()
 
     while True:
         try:
@@ -54,19 +301,201 @@ def avvia_chat(prompt: str, modello: str, max_messaggi: int) -> None:
         messaggi.append(messaggio_utente)
         limita_cronologia(messaggi, max_messaggi)
 
-        print("\nAster: ", end="", flush=True)
-
-        risposta_completa = ""
-
         try:
-            stream = avvia_stream(modello, messaggi)
+            risposta = esegui_turno_con_tools(
+                modello,
+                messaggi,
+                TOOLS_MEMORIA,
+                host_ollama,
+            )
 
-            for parte in stream:
-                testo = parte["message"]["content"]
-                risposta_completa += testo
-                print(testo, end="", flush=True)
+            tool_calls = risposta.message.tool_calls or []
 
-            print()
+            if len(tool_calls) > 1:
+                risposta_completa = (
+                    "Posso gestire una sola operazione "
+                    "di memoria per volta. "
+                    "Indicami quale vuoi eseguire per prima."
+                )
+
+                print(
+                    f"\nAster: {risposta_completa}"
+                )
+
+                messaggi.append(
+                    {
+                        "role": "assistant",
+                        "content": risposta_completa,
+                    }
+                )
+
+                limita_cronologia(
+                    messaggi,
+                    max_messaggi,
+                )
+
+                continue
+
+            # -------------------------------------------------
+            # NESSUN TOOL RICHIESTO
+            # -------------------------------------------------
+
+            if not tool_calls:
+                if sembra_domanda_memoria(domanda):
+                    risultato_memoria = cerca_memoria_fallback(
+                        domanda,
+                        stato_memoria,
+                        stato_sessione,
+                        percorso_memoria,
+                        limite_ricerca,
+                    )
+
+                    if risultato_memoria is not None:
+                        messaggi_memoria = list(messaggi)
+
+                        messaggi_memoria.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "RISULTATO MEMORIA PERSISTENTE "
+                                    "RECUPERATO DA PYTHON:\n"
+                                    + json.dumps(
+                                        risultato_memoria,
+                                        ensure_ascii=False,
+                                    )
+                                    + "\n"
+                                    "Usa esclusivamente questi dati "
+                                    "per rispondere alla domanda corrente. "
+                                    "Python è la fonte di verità. "
+                                    "Non inventare informazioni mancanti."
+                                ),
+                            }
+                        )
+
+                        risposta_memoria = (
+                            esegui_risposta_finale(
+                                modello,
+                                messaggi_memoria,
+                                host_ollama,
+                            )
+                        )
+
+                        risposta_completa = raccogli_risposta_finale(
+                            risposta_memoria
+                        )
+
+                        print(
+                            f"\nAster: {risposta_completa}"
+                        )
+
+                        messaggi.append(
+                            {
+                                "role": "assistant",
+                                "content": risposta_completa,
+                            }
+                        )
+
+                        limita_cronologia(
+                            messaggi,
+                            max_messaggi,
+                        )
+
+                        continue
+                risposta_completa = pulisci_testo_modello(
+                    risposta.message.content or ""
+                )
+
+                print(
+                        f"\nAster: {risposta_completa}"
+                    )
+
+                messaggi.append(
+                        {
+                            "role": "assistant",
+                            "content": risposta_completa,
+                        }
+                    )
+
+                limita_cronologia(
+                        messaggi,
+                        max_messaggi,
+                    )
+
+                continue
+
+            # -------------------------------------------------
+            # TOOL RICHIESTO DAL MODELLO
+            # -------------------------------------------------
+
+            chiamata = tool_calls[0]
+
+            nome_tool = chiamata.function.name
+            argomenti = chiamata.function.arguments
+
+            if isinstance(argomenti, str):
+                argomenti = json.loads(argomenti)
+
+            # Conserviamo il messaggio assistant contenente
+            # la tool call nella cronologia.
+            messaggi.append(
+                risposta.message
+            )
+
+            risultato_tool = esegui_tool_memoria(
+                nome_tool=nome_tool,
+                argomenti=argomenti,
+                stato_memoria=stato_memoria,
+                stato_sessione=stato_sessione,
+                percorso_memoria=percorso_memoria,
+                limite_ricerca=limite_ricerca,
+            )
+            if (
+                nome_tool == "cerca_memoria"
+                and risultato_tool.get("status") == "searched"
+                and risultato_tool.get("returned", 0) == 0
+                and sembra_domanda_memoria(domanda)
+            ):
+                risultato_fallback = cerca_memoria_fallback(
+                    domanda,
+                    stato_memoria,
+                    stato_sessione,
+                    percorso_memoria,
+                    limite_ricerca,
+                )
+
+                if risultato_fallback is not None:
+                    risultato_tool = risultato_fallback
+
+            # Python è la fonte di verità.
+            # Il modello riceve esattamente il risultato
+            # dell'operazione realmente eseguita.
+            messaggi.append(
+                {
+                    "role": "tool",
+                    "content": json.dumps(
+                        risultato_tool,
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+
+            # -------------------------------------------------
+            # RISPOSTA FINALE DOPO IL TOOL
+            # -------------------------------------------------
+
+            stream = esegui_risposta_finale(
+                modello,
+                messaggi,
+                host_ollama,
+            )
+
+            risposta_completa = raccogli_risposta_finale(
+                stream
+            )
+
+            print(
+                f"\nAster: {risposta_completa}"
+            )
 
             messaggi.append(
                 {
@@ -75,20 +504,32 @@ def avvia_chat(prompt: str, modello: str, max_messaggi: int) -> None:
                 }
             )
 
-            limita_cronologia(messaggi, max_messaggi)
+            limita_cronologia(
+                messaggi,
+                max_messaggi,
+            )
 
         except KeyboardInterrupt:
-            print("\n\nGenerazione interrotta.")
+            print(
+                "\n\nGenerazione interrotta."
+            )
 
-            # La domanda non ha ricevuto una risposta completa:
-            # la rimuoviamo per mantenere coerente la cronologia.
-            if messaggi and messaggi[-1] is messaggio_utente:
+            if (
+                messaggi
+                and messaggi[-1]
+                is messaggio_utente
+            ):
                 messaggi.pop()
 
         except Exception as errore:
-            print(f"\nErrore nella comunicazione con Ollama: {errore}")
+            print(
+                "\nErrore nella comunicazione "
+                f"con Ollama: {errore}"
+            )
 
-            # Evita di lasciare nella cronologia un messaggio user
-            # senza la relativa risposta assistant.
-            if messaggi and messaggi[-1] is messaggio_utente:
+            if (
+                messaggi
+                and messaggi[-1]
+                is messaggio_utente
+            ):
                 messaggi.pop()

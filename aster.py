@@ -37,6 +37,9 @@ def main() -> None:
         modello = config["ollama"]["model"]
         max_messaggi = config["chat"]["history_limit"]
 
+        host_ollama = config["ollama"]["host"]
+        limite_ricerca = config["memory"]["search_max_results"]
+
         percorso_prompt = BASE_DIR / config["files"]["prompt"]
         prompt = carica_prompt(percorso_prompt)
 
@@ -44,8 +47,10 @@ def main() -> None:
         stato_memoria = inizializza_memoria(percorso_memoria)
 
         print("Controllo connessione con Ollama...")
-        controlla_ollama(modello)
-
+        controlla_ollama(
+        modello,
+        host_ollama,
+    )
     except (
         FileNotFoundError,
         json.JSONDecodeError,
@@ -64,7 +69,15 @@ def main() -> None:
     if stato_memoria.messaggio:
         print(f"\nMemoria: {stato_memoria.messaggio}")
 
-    avvia_chat(prompt, modello, max_messaggi)
+    avvia_chat(
+        prompt,
+        modello,
+        max_messaggi,
+        host_ollama,
+        stato_memoria,
+        percorso_memoria,
+        limite_ricerca,
+)
 
 if __name__ == "__main__":
     main()
