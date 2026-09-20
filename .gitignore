@@ -23,3 +23,6 @@ ASTER_ALLINEAMENTO_REVISIONE_*.txt
 
 # Memoria
 data/
+
+# Note
+note/

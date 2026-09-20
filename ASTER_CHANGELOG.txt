@@ -432,3 +432,64 @@ Stato
 
 Punto B della memoria persistente completato.
 Versione approvata dopo test e review indipendente finale.
+
+---
+
+v0.5.2 - Memoria dentro la chat
+
+Obiettivo
+
+Integrare la memoria persistente nel ciclo conversazionale di Aster
+tramite i tool nativi di Ollama, rendendo la memoria utilizzabile
+direttamente durante la chat invece che come modulo isolato.
+
+Memoria nella chat
+
+* Integrazione della memoria persistente nella chat tramite i tool
+  nativi di Ollama (function calling).
+* Ricerca e recupero della memoria, con fallback Python quando il
+  modello non emette una tool_call per una domanda che riguarda
+  informazioni già memorizzate.
+* Creazione di nuovi ricordi in modalità esplicita e in modalità
+  proposta, quest'ultima soggetta a conferma dell'utente.
+* Modifica di un ricordo esistente sempre soggetta a un pending di
+  conferma prima di essere applicata.
+* Eliminazione e ripristino di un ricordo, sempre soggetti a
+  conferma esplicita.
+* Eliminazione di un ricordo senza ID esplicito tramite ricerca
+  automatica e, in presenza di più candidati, un pending di
+  selezione: nessun ID viene scelto autonomamente.
+* Gestione dei conflitti fra operazioni di memoria in attesa: non
+  è possibile avviare una nuova operazione finché quella corrente
+  non è stata confermata o annullata.
+
+Robustezza
+
+* Comportamento robusto in modalità di sola lettura e in modalità
+  disabilitata: le operazioni di scrittura vengono bloccate in modo
+  coerente, la ricerca resta disponibile in sola lettura.
+* Blocco delle richieste con più di una tool_call nello stesso
+  turno: nessuna operazione viene eseguita, viene chiesto
+  all'utente di indicare un'unica operazione.
+* Fallback deterministico locale quando il secondo giro Ollama
+  fallisce dopo che un tool di memoria è già stato eseguito:
+  nessuna riesecuzione automatica dell'operazione.
+* Timeout Ollama configurabile tramite config.json, con default di
+  60 secondi se il campo non è presente.
+* Pulizia dell'output del modello dai blocchi <think>...</think>
+  eventualmente residui.
+* Miglioramenti di robustezza e validazione nella gestione degli
+  errori di comunicazione con Ollama.
+
+Note
+
+* Il rilevamento di segreti (password, token, credenziali) è
+  attualmente demandato alle istruzioni del modello e non è
+  applicato a livello di codice.
+* Il fallback Python per la mancata emissione di una tool_call
+  copre la ricerca in memoria e l'eliminazione ambigua; non copre
+  ancora tutti gli intenti di memoria.
+
+Stato
+
+Punto C della memoria persistente completato.

@@ -30,4 +30,38 @@ def carica_config(config_file: Path) -> dict:
             "un numero intero."
         )
 
+    search_max_results = config["memory"]["search_max_results"]
+
+    if type(search_max_results) is not int:
+        raise TypeError(
+            "Il campo 'memory.search_max_results' in config.json "
+            "deve essere un numero intero."
+        )
+
+    if search_max_results < 1:
+        raise ValueError(
+            "Il campo 'memory.search_max_results' in config.json "
+            "deve essere maggiore o uguale a 1."
+        )
+
+    # Il campo timeout è opzionale per compatibilità con config.json
+    # precedenti: se manca, il chiamante userà il default (60).
+    if "timeout" in config["ollama"]:
+        timeout_ollama = config["ollama"]["timeout"]
+
+        if (
+            isinstance(timeout_ollama, bool)
+            or not isinstance(timeout_ollama, (int, float))
+        ):
+            raise TypeError(
+                "Il campo 'ollama.timeout' in config.json deve essere "
+                "un numero (int o float)."
+            )
+
+        if timeout_ollama <= 0:
+            raise ValueError(
+                "Il campo 'ollama.timeout' in config.json deve essere "
+                "maggiore di 0."
+            )
+
     return config

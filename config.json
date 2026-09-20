@@ -1,17 +1,22 @@
 {
     "assistant": {
         "name": "Aster",
-        "version": "0.5.1"
+        "version": "0.5.2"
     },
 
     "ollama": {
         "model": "qwen3:8b",
-        "host": "http://localhost:11434"
+        "host": "http://localhost:11434",
+        "timeout": 60
     },
 
     "chat": {
         "history_limit": 20,
         "stream": true
+    },
+
+    "memory": {
+        "search_max_results": 5
     },
 
     "files": {
