@@ -3,7 +3,7 @@
 import ollama
 
 
-def crea_client(host: str) -> ollama.Client:
+def crea_client(host: str, timeout: float = 60) -> ollama.Client:
     """Crea un client Ollama usando l'endpoint configurato."""
 
     if not isinstance(host, str) or not host.strip():
@@ -13,19 +13,21 @@ def crea_client(host: str) -> ollama.Client:
 
     return ollama.Client(
         host=host.strip(),
+        timeout=timeout,
     )
 
 
 def controlla_ollama(
     modello: str,
     host: str,
+    timeout: float = 60,
 ) -> None:
     """
     Verifica che Ollama sia raggiungibile e che il modello
     indicato sia disponibile.
     """
 
-    client = crea_client(host)
+    client = crea_client(host, timeout)
 
     try:
         risposta = client.list()
@@ -82,10 +84,11 @@ def avvia_stream(
     modello: str,
     messaggi: list[dict],
     host: str = "http://localhost:11434",
+    timeout: float = 60,
 ):
     """Avvia lo streaming normale della risposta."""
 
-    client = crea_client(host)
+    client = crea_client(host, timeout)
 
     return client.chat(
         model=modello,
@@ -100,6 +103,7 @@ def esegui_turno_con_tools(
     messaggi: list[dict],
     tools: list[dict],
     host: str,
+    timeout: float = 60,
 ):
     """
     Esegue il primo giro LLM con tool disponibili.
@@ -109,7 +113,7 @@ def esegui_turno_con_tools(
     decide se gestire testo normale oppure tool call.
     """
 
-    client = crea_client(host)
+    client = crea_client(host, timeout)
 
     return client.chat(
         model=modello,
@@ -124,6 +128,7 @@ def esegui_risposta_finale(
     modello: str,
     messaggi: list[dict],
     host: str,
+    timeout: float = 60,
 ):
     """
     Genera la risposta finale dopo l'esecuzione di un tool.
@@ -131,7 +136,7 @@ def esegui_risposta_finale(
     In questa fase non vengono esposti nuovi tool.
     """
 
-    client = crea_client(host)
+    client = crea_client(host, timeout)
 
     return client.chat(
         model=modello,

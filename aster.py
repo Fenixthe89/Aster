@@ -38,6 +38,7 @@ def main() -> None:
         max_messaggi = config["chat"]["history_limit"]
 
         host_ollama = config["ollama"]["host"]
+        timeout_ollama = config["ollama"].get("timeout", 60)
         limite_ricerca = config["memory"]["search_max_results"]
 
         percorso_prompt = BASE_DIR / config["files"]["prompt"]
@@ -50,6 +51,7 @@ def main() -> None:
         controlla_ollama(
         modello,
         host_ollama,
+        timeout_ollama,
     )
     except (
         FileNotFoundError,
@@ -74,6 +76,7 @@ def main() -> None:
         modello,
         max_messaggi,
         host_ollama,
+        timeout_ollama,
         stato_memoria,
         percorso_memoria,
         limite_ricerca,

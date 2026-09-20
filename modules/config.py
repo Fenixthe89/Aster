@@ -44,4 +44,24 @@ def carica_config(config_file: Path) -> dict:
             "deve essere maggiore o uguale a 1."
         )
 
+    # Il campo timeout è opzionale per compatibilità con config.json
+    # precedenti: se manca, il chiamante userà il default (60).
+    if "timeout" in config["ollama"]:
+        timeout_ollama = config["ollama"]["timeout"]
+
+        if (
+            isinstance(timeout_ollama, bool)
+            or not isinstance(timeout_ollama, (int, float))
+        ):
+            raise TypeError(
+                "Il campo 'ollama.timeout' in config.json deve essere "
+                "un numero (int o float)."
+            )
+
+        if timeout_ollama <= 0:
+            raise ValueError(
+                "Il campo 'ollama.timeout' in config.json deve essere "
+                "maggiore di 0."
+            )
+
     return config

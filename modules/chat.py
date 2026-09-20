@@ -265,6 +265,166 @@ def pulisci_testo_modello(testo: str) -> str:
 
     return pulito.strip()
 
+def genera_risposta_deterministica_memoria(
+    risultato_tool: dict,
+) -> str:
+    """
+    Genera una risposta locale quando il tool memoria è già stato
+    eseguito ma Ollama non riesce a produrre la risposta finale.
+    """
+
+    status = risultato_tool.get("status")
+    memory_id = risultato_tool.get("memory_id")
+    content = risultato_tool.get("content")
+    error = risultato_tool.get("error")
+
+    if status == "created":
+        return (
+            f"Ho salvato il ricordo con ID {memory_id}: "
+            f'"{content}"'
+        )
+
+    if status == "updated":
+        return (
+            f"Ho aggiornato il ricordo con ID {memory_id}: "
+            f'"{content}"'
+        )
+
+    if status == "deleted":
+        return (
+            f"Il ricordo con ID {memory_id} è stato "
+            "spostato nel cestino."
+        )
+
+    if status == "restored":
+        return (
+            f"Il ricordo con ID {memory_id} è stato "
+            "ripristinato."
+        )
+
+    if status == "pending_confirmation":
+        before = risultato_tool.get("before")
+        after = risultato_tool.get("after")
+
+        if before is not None and after is not None:
+            return (
+                "Modifica in attesa di conferma:\n\n"
+                f"PRIMA: {before}\n"
+                f"DOPO: {after}\n\n"
+                "Confermi?"
+            )
+
+        if content is not None:
+            return (
+                f'Operazione in attesa sul ricordo '
+                f'ID {memory_id}: "{content}"\n\n'
+                "Confermi?"
+            )
+
+        return "L'operazione è in attesa di conferma. Confermi?"
+
+    if status == "pending_selection":
+        candidati = risultato_tool.get("candidates", [])
+
+        righe = [
+            "Ho trovato più ricordi compatibili:",
+            "",
+        ]
+
+        for candidato in candidati:
+            righe.append(
+                f'ID {candidato.get("id")}: '
+                f'"{candidato.get("content")}"'
+            )
+
+        righe.extend([
+            "",
+            "Quale ID vuoi selezionare?",
+        ])
+
+        return "\n".join(righe)
+
+    if status == "blocked_readonly":
+        return "La memoria è disponibile solo in lettura."
+
+    if status == "blocked_disabled":
+        return "La memoria persistente è disabilitata."
+
+    if status == "not_found":
+        return error or "Non ho trovato il ricordo richiesto."
+
+    if status == "duplicate_detected":
+        return (
+            f"Esiste già un ricordo equivalente"
+            + (
+                f" con ID {memory_id}."
+                if memory_id is not None
+                else "."
+            )
+        )
+
+    if status == "conflict":
+        return (
+            "Esiste già un'operazione di memoria in attesa. "
+            "Confermala o annullala prima di iniziarne un'altra."
+        )
+
+    if status == "cancelled":
+        return "Operazione di memoria annullata."
+
+    if status in {"validation_error", "tool_error"}:
+        return error or "Si è verificato un errore nella memoria."
+
+    if status == "searched":
+        risultati = risultato_tool.get("results", [])
+
+        if not risultati:
+            return "Non ho trovato ricordi pertinenti."
+
+        righe = ["Ho recuperato questi ricordi:", ""]
+
+        for ricordo in risultati:
+            righe.append(
+                f'ID {ricordo.get("id")}: '
+                f'"{ricordo.get("content")}"'
+            )
+
+        return "\n".join(righe)
+
+    return (
+        "L'operazione di memoria è stata elaborata, "
+        "ma non riesco a generare la risposta finale."
+    )
+
+def genera_risposta_finale_memoria(
+    *,
+    modello: str,
+    messaggi: list,
+    host_ollama: str,
+    timeout_ollama: float,
+    risultato_tool: dict,
+) -> str:
+    """
+    Prova il secondo passaggio LLM.
+    Se Ollama fallisce, usa il risultato Python già ottenuto.
+    """
+
+    try:
+        stream = esegui_risposta_finale(
+            modello,
+            messaggi,
+            host_ollama,
+            timeout_ollama,
+        )
+
+        return raccogli_risposta_finale(
+            stream
+        )
+
+    except Exception:
+        return genera_risposta_deterministica_memoria(
+            risultato_tool
+        )
 
 def raccogli_risposta_finale(stream) -> str:
     """
@@ -307,6 +467,7 @@ def avvia_chat(
     modello: str,
     max_messaggi: int,
     host_ollama: str,
+    timeout_ollama: float,
     stato_memoria: StatoMemoria,
     percorso_memoria: Path,
     limite_ricerca: int,
@@ -351,6 +512,7 @@ def avvia_chat(
                 messaggi,
                 TOOLS_MEMORIA,
                 host_ollama,
+                timeout_ollama,
             )
 
             tool_calls = risposta.message.tool_calls or []
@@ -385,7 +547,7 @@ def avvia_chat(
             # -------------------------------------------------
 
             if not tool_calls:
-                
+
                 if sembra_eliminazione_memoria_senza_id(domanda):
                     risultato_memoria = esegui_tool_memoria(
                         nome_tool="elimina_memoria_per_query",
@@ -416,14 +578,12 @@ def avvia_chat(
                         }
                     )
 
-                    risposta_memoria = esegui_risposta_finale(
-                        modello,
-                        messaggi_memoria,
-                        host_ollama,
-                    )
-
-                    risposta_completa = raccogli_risposta_finale(
-                        risposta_memoria
+                    risposta_completa = genera_risposta_finale_memoria(
+                        modello=modello,
+                        messaggi=messaggi_memoria,
+                        host_ollama=host_ollama,
+                        timeout_ollama=timeout_ollama,
+                        risultato_tool=risultato_memoria,
                     )
 
                     print(
@@ -475,16 +635,12 @@ def avvia_chat(
                             }
                         )
 
-                        risposta_memoria = (
-                            esegui_risposta_finale(
-                                modello,
-                                messaggi_memoria,
-                                host_ollama,
-                            )
-                        )
-
-                        risposta_completa = raccogli_risposta_finale(
-                            risposta_memoria
+                        risposta_completa = genera_risposta_finale_memoria(
+                            modello=modello,
+                            messaggi=messaggi_memoria,
+                            host_ollama=host_ollama,
+                            timeout_ollama=timeout_ollama,
+                            risultato_tool=risultato_memoria,
                         )
 
                         print(
@@ -586,15 +742,22 @@ def avvia_chat(
             # RISPOSTA FINALE DOPO IL TOOL
             # -------------------------------------------------
 
-            stream = esegui_risposta_finale(
-                modello,
-                messaggi,
-                host_ollama,
-            )
+            try:
+                risposta_completa = genera_risposta_finale_memoria(
+                    modello=modello,
+                    messaggi=messaggi,
+                    host_ollama=host_ollama,
+                    timeout_ollama=timeout_ollama,
+                    risultato_tool=risultato_tool,
+                )
 
-            risposta_completa = raccogli_risposta_finale(
-                stream
-            )
+
+            except Exception:
+                risposta_completa = (
+                    genera_risposta_deterministica_memoria(
+                        risultato_tool
+                    )
+                )
 
             print(
                 f"\nAster: {risposta_completa}"
