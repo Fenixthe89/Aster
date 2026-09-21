@@ -11,7 +11,7 @@ from modules.memory import (
     aggiungi_ricordo,
     aggiorna_ricordo,
     carica_archivio,
-    carica_cestino,
+    carica_cestino_con_recovery,
     cerca_memoria,
     elimina_ricordo,
     ripristina_ricordo,
@@ -1012,23 +1012,30 @@ def esegui_tool_memoria(
             "deleted_memories.json"
         )
 
-        if not percorso_cestino.exists():
+        percorso_backup_cestino = percorso_cestino.with_name(
+            f"{percorso_cestino.stem}.backup{percorso_cestino.suffix}"
+        )
+
+        try:
+            cestino = carica_cestino_con_recovery(
+                percorso_cestino,
+                percorso_backup_cestino,
+            )
+        except (OSError, ValueError, RuntimeError) as errore:
+            return crea_risultato_tool(
+                ok=False,
+                operation="restore",
+                status="tool_error",
+                error=str(errore),
+            )
+
+        if cestino is None:
             return crea_risultato_tool(
                 ok=False,
                 operation="restore",
                 status="not_found",
                 memory_id=memory_id,
                 error="Il cestino non esiste.",
-            )
-
-        try:
-            cestino = carica_cestino(percorso_cestino)
-        except (OSError, ValueError) as errore:
-            return crea_risultato_tool(
-                ok=False,
-                operation="restore",
-                status="tool_error",
-                error=str(errore),
             )
 
         ricordo = _trova_ricordo_eliminato_per_id(cestino, memory_id)

@@ -487,6 +487,95 @@ def salva_cestino(percorso: Path, cestino: dict) -> None:
         percorso,
     )
 
+def _timestamp_univoco() -> str:
+    """Genera un suffisso temporale univoco per preservare file corrotti."""
+
+    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+def _promuovi_backup_a_cestino(percorso: Path, percorso_backup: Path) -> dict:
+    """
+    Promuove il backup del cestino a nuovo file principale.
+
+    Il backup viene validato prima di qualunque altra operazione e non
+    viene mai modificato. Se il file principale esiste già (anche
+    corrotto), ne viene preservata una copia byte-per-byte con un nome
+    univoco prima di essere sostituito. In caso di errore prima della
+    promozione finale, nessun file definitivo viene toccato.
+    """
+
+    cestino_backup = carica_cestino(percorso_backup)
+
+    percorso_temporaneo = percorso.with_suffix(".tmp")
+
+    percorso_corrotto_temporaneo = percorso.with_name(
+        f"{percorso.stem}.corrupted.tmp"
+    )
+
+    try:
+        if percorso.exists():
+            shutil.copy2(
+                percorso,
+                percorso_corrotto_temporaneo,
+            )
+
+        shutil.copy2(
+            percorso_backup,
+            percorso_temporaneo,
+        )
+
+        carica_cestino(percorso_temporaneo)
+
+        if percorso_corrotto_temporaneo.exists():
+            percorso_corrotto = percorso.with_name(
+                f"{percorso.stem}.corrupted."
+                f"{_timestamp_univoco()}{percorso.suffix}"
+            )
+
+            os.replace(
+                percorso_corrotto_temporaneo,
+                percorso_corrotto,
+            )
+
+        os.replace(
+            percorso_temporaneo,
+            percorso,
+        )
+    finally:
+        for percorso_temp in (
+            percorso_temporaneo,
+            percorso_corrotto_temporaneo,
+        ):
+            if percorso_temp.exists():
+                percorso_temp.unlink()
+
+    return carica_cestino(percorso)
+
+def carica_cestino_con_recovery(
+    percorso: Path,
+    percorso_backup: Path,
+) -> dict | None:
+    """
+    Carica il cestino tentando un recovery automatico e conservativo
+    dal backup quando il file principale è corrotto o assente.
+
+    Restituisce None soltanto quando non esiste né il principale né
+    un backup utilizzabile: in quel caso il chiamante decide se
+    trattarlo come prima esecuzione (nessun ricordo mai eliminato).
+    """
+
+    if percorso.exists():
+        try:
+            return carica_cestino(percorso)
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+
+        return _promuovi_backup_a_cestino(percorso, percorso_backup)
+
+    if not percorso_backup.exists():
+        return None
+
+    return _promuovi_backup_a_cestino(percorso, percorso_backup)
+
 def crea_archivio_su_disco(percorso: Path) -> dict:
     """
     Crea un nuovo archivio memoria sul disco in modo sicuro.
@@ -653,9 +742,16 @@ def elimina_ricordo(
             f"Nessun ricordo trovato con ID {memory_id}."
         )
 
-    if percorso_cestino.exists():
-        cestino = carica_cestino(percorso_cestino)
-    else:
+    percorso_backup_cestino = percorso_cestino.with_name(
+        f"{percorso_cestino.stem}.backup{percorso_cestino.suffix}"
+    )
+
+    cestino = carica_cestino_con_recovery(
+        percorso_cestino,
+        percorso_backup_cestino,
+    )
+
+    if cestino is None:
         cestino = crea_cestino_vuoto()
 
     ricordo_gia_nel_cestino = None
@@ -719,7 +815,20 @@ def ripristina_ricordo(
         )
 
     memoria = carica_archivio(percorso_memoria)
-    cestino = carica_cestino(percorso_cestino)
+
+    percorso_backup_cestino = percorso_cestino.with_name(
+        f"{percorso_cestino.stem}.backup{percorso_cestino.suffix}"
+    )
+
+    cestino = carica_cestino_con_recovery(
+        percorso_cestino,
+        percorso_backup_cestino,
+    )
+
+    if cestino is None:
+        raise ValueError(
+            f"Nessun ricordo eliminato trovato con ID {memory_id}."
+        )
 
     ricordo_eliminato = None
 
