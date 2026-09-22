@@ -14,6 +14,7 @@ from modules.ollama_manager import (
     esegui_risposta_finale,
     esegui_turno_con_tools,
 )
+from modules.tool_registry import ContestoMemoria, crea_registro_memoria
 
 TOOLS_RICERCA_MEMORIA = [
     tool
@@ -465,6 +466,15 @@ def avvia_chat(
 
     stato_sessione = MemorySessionState()
 
+    registro_strumenti = crea_registro_memoria()
+
+    contesto_strumenti = ContestoMemoria(
+        stato_memoria=stato_memoria,
+        stato_sessione=stato_sessione,
+        percorso_memoria=percorso_memoria,
+        limite_ricerca=limite_ricerca,
+    )
+
     while True:
         try:
             domanda = input("\nTu: ").strip()
@@ -492,7 +502,7 @@ def avvia_chat(
             risposta = esegui_turno_con_tools(
                 modello,
                 messaggi,
-                TOOLS_MEMORIA,
+                registro_strumenti.elenco_schema(),
                 host_ollama,
                 timeout_ollama,
             )
@@ -502,7 +512,7 @@ def avvia_chat(
             if len(tool_calls) > 1:
                 risposta_completa = (
                     "Posso gestire una sola operazione "
-                    "di memoria per volta. "
+                    "per volta. "
                     "Indicami quale vuoi eseguire per prima."
                 )
 
@@ -676,19 +686,21 @@ def avvia_chat(
             if isinstance(argomenti, str):
                 argomenti = json.loads(argomenti)
 
+            # Dominio determinato esplicitamente dal registry (nessuna
+            # euristica su prefissi/substring del nome del tool).
+            tool_spec = registro_strumenti.trova(nome_tool)
+            dominio_tool = tool_spec.dominio if tool_spec is not None else None
+
             # Conserviamo il messaggio assistant contenente
             # la tool call nella cronologia.
             messaggi.append(
                 risposta.message
             )
 
-            risultato_tool = esegui_tool_memoria(
-                nome_tool=nome_tool,
-                argomenti=argomenti,
-                stato_memoria=stato_memoria,
-                stato_sessione=stato_sessione,
-                percorso_memoria=percorso_memoria,
-                limite_ricerca=limite_ricerca,
+            risultato_tool = registro_strumenti.dispatch(
+                nome_tool,
+                argomenti,
+                contesto_strumenti,
             )
             if (
                 nome_tool == "cerca_memoria"
@@ -724,7 +736,10 @@ def avvia_chat(
             # RISPOSTA FINALE DOPO IL TOOL
             # -------------------------------------------------
 
-            if risultato_tool.get("status") == "blocked_sensitive":
+            if (
+                dominio_tool == "memory"
+                and risultato_tool.get("status") == "blocked_sensitive"
+            ):
                 # Contenuto potenzialmente sensibile: nessun secondo
                 # giro Ollama, per non fargli mai vedere/ripetere il
                 # valore rilevato. Risposta locale deterministica.
