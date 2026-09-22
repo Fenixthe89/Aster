@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+from modules.memory_query import estrai_query_da_testo
+
 from modules.memory import (
     MODALITA_DISABILITATA,
     MODALITA_NORMALE,
@@ -489,64 +491,42 @@ def prepara_selezione_memoria(
         source="persistent_memory",
     )
 
+STOPWORD_ELIMINAZIONE_MEMORIA = {
+    "il",
+    "lo",
+    "la",
+    "i",
+    "gli",
+    "le",
+    "un",
+    "uno",
+    "una",
+    "ricordo",
+    "ricordi",
+    "memoria",
+    "elimina",
+    "eliminare",
+    "cancella",
+    "cancellare",
+    "su",
+    "di",
+    "del",
+    "della",
+    "dei",
+    "delle",
+    "per",
+    "che",
+    "quello",
+    "quella",
+}
+
 def _genera_query_eliminazione(query: str) -> list[str]:
     """
     Genera fallback conservativi per una richiesta
     di eliminazione senza ID.
     """
 
-    parole = re.findall(
-        r"[a-zA-ZÀ-ÿ0-9_+-]+",
-        query.casefold(),
-    )
-
-    stopword = {
-        "il",
-        "lo",
-        "la",
-        "i",
-        "gli",
-        "le",
-        "un",
-        "uno",
-        "una",
-        "ricordo",
-        "ricordi",
-        "memoria",
-        "elimina",
-        "eliminare",
-        "cancella",
-        "cancellare",
-        "su",
-        "di",
-        "del",
-        "della",
-        "dei",
-        "delle",
-        "per",
-        "che",
-        "quello",
-        "quella",
-    }
-
-    significative = [
-        parola
-        for parola in parole
-        if parola not in stopword
-        and len(parola) >= 4
-    ]
-
-    query_fallback = []
-
-    for indice in range(len(significative) - 1):
-        query_fallback.append(
-            f"{significative[indice]} "
-            f"{significative[indice + 1]}"
-        )
-
-    query_fallback.extend(significative)
-
-    return query_fallback
+    return estrai_query_da_testo(query, STOPWORD_ELIMINAZIONE_MEMORIA)
 
 
 # ---------------------------------------------------------------

@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from modules.memory import StatoMemoria
+from modules.memory_query import estrai_query_da_testo
 from modules.memory_session import MemorySessionState
 from modules.memory_tools import (
     TOOLS_MEMORIA,
@@ -122,77 +123,52 @@ def sembra_eliminazione_memoria_senza_id(domanda: str) -> bool:
         and not ha_id_esplicito
     )
 
+STOPWORD_RECALL_MEMORIA = {
+    "che",
+    "chi",
+    "cosa",
+    "come",
+    "dove",
+    "quando",
+    "quale",
+    "quali",
+    "qual",
+    "uso",
+    "usi",
+    "usa",
+    "usare",
+    "per",
+    "con",
+    "del",
+    "della",
+    "dei",
+    "delle",
+    "nel",
+    "nella",
+    "nei",
+    "nelle",
+    "il",
+    "lo",
+    "la",
+    "i",
+    "gli",
+    "le",
+    "un",
+    "uno",
+    "una",
+    "mio",
+    "mia",
+    "miei",
+    "mie",
+}
+
 def genera_query_memoria(domanda: str) -> list[str]:
     """
     Estrae query semplici e conservative dalla domanda
     per il fallback della ricerca memoria.
     """
 
-    parole = re.findall(
-        r"[a-zA-ZÀ-ÿ0-9_+-]+",
-        domanda.casefold(),
-    )
-
-    stopword = {
-        "che",
-        "chi",
-        "cosa",
-        "come",
-        "dove",
-        "quando",
-        "quale",
-        "quali",
-        "qual",
-        "uso",
-        "usi",
-        "usa",
-        "usare",
-        "per",
-        "con",
-        "del",
-        "della",
-        "dei",
-        "delle",
-        "nel",
-        "nella",
-        "nei",
-        "nelle",
-        "il",
-        "lo",
-        "la",
-        "i",
-        "gli",
-        "le",
-        "un",
-        "uno",
-        "una",
-        "mio",
-        "mia",
-        "miei",
-        "mie",
-    }
-
-    significative = [
-        parola
-        for parola in parole
-        if parola not in stopword
-        and len(parola) >= 4
-    ]
-
-    query = []
-
-    # Prima proviamo coppie specifiche:
-    # "progetto aster", "sistema operativo", ecc.
-    for indice in range(len(significative) - 1):
-        query.append(
-            f"{significative[indice]} "
-            f"{significative[indice + 1]}"
-        )
-
-    # Poi singole parole.
-    query.extend(significative)
-
-    return query
+    return estrai_query_da_testo(domanda, STOPWORD_RECALL_MEMORIA)
 
 def cerca_memoria_fallback(
     domanda: str,
