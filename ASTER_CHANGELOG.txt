@@ -493,3 +493,94 @@ Note
 Stato
 
 Punto C della memoria persistente completato.
+
+---
+
+v0.5.3 - Memory Safety & Integrity
+
+Obiettivo
+
+Chiudere una serie di gap di sicurezza e integrità del sottosistema
+memoria identificati dopo la v0.5.2, senza introdurre nuovi fallback
+conversazionali né cambiare lo schema esistente: recovery del
+cestino, protezione dei contenuti sensibili, una prima suite di test
+di regressione persistente e la consolidazione di codice duplicato.
+
+Recovery automatico del cestino
+
+* Introdotto un recovery automatico e conservativo di
+  deleted_memories.json a partire da deleted_memories.backup.json,
+  analogo a quello già esistente per la memoria principale.
+* Il recovery si attiva sia quando il file principale del cestino è
+  assente sia quando è corrotto, purché il backup sia valido.
+* Il file corrotto del cestino non viene mai perso: ne viene
+  preservata una copia byte-per-byte con nome univoco
+  (deleted_memories.corrupted.<timestamp>.json) prima di qualunque
+  sostituzione.
+* Il backup non viene mai scritto o alterato durante il recovery:
+  resta la fonte di verità fino al completamento della promozione
+  atomica.
+* Se il backup è a sua volta assente o corrotto, l'operazione viene
+  bloccata in modo conservativo, senza alcuna modifica a memoria
+  attiva, cestino o backup.
+
+Secret Guard lato Python
+
+* Introdotto un rilevatore di contenuto sensibile lato Python,
+  applicato prima di qualunque scrittura o pending in crea_memoria
+  (sia modalità esplicita sia proposta) e in modifica_memoria.
+* Nuovo status blocked_sensitive.
+* Categorie rilevate ad alta confidenza (parola chiave pertinente +
+  assegnazione esplicita, o marcatori/prefissi strutturalmente
+  inequivocabili): password, API key/token, PIN, CVV, OTP/2FA, carte
+  di pagamento (contesto + validazione Luhn), chiavi private (PEM),
+  codici/frasi di recovery.
+* Nessuna scrittura e nessun pending vengono creati per contenuti
+  classificati come sensibili.
+* Nessun secondo giro Ollama viene effettuato quando lo status è
+  blocked_sensitive: risposta locale deterministica immediata.
+* Il valore rilevato non compare mai nel risultato del tool né nella
+  risposta deterministica finale.
+
+Suite di test di regressione persistente
+
+* Introdotta la prima suite di test automatici del progetto,
+  tests/test_memory_invariants.py, basata su unittest della standard
+  library.
+* Fissa come regressione le invarianti conservative del layer
+  memoria: nessuna mutazione senza un target certo, selezione
+  esplicita quando esistono più candidati, conferma esplicita prima
+  di ogni mutazione applicabile (update/delete/restore), il
+  contratto reale di crea_memoria in modalità esplicita, e la
+  precedenza del blocco per contenuto sensibile su qualunque pending
+  o scrittura.
+* Ogni test opera su una directory temporanea isolata; nessun test
+  legge o scrive i file reali in data/.
+
+Consolidamento della normalizzazione query
+
+* Introdotto modules/memory_query.py con un unico algoritmo
+  condiviso di estrazione di query da testo libero, usato sia dal
+  fallback di ricerca (recall) sia dal fallback di eliminazione
+  ambigua (delete-per-query).
+* Le stopword specifiche dei due domini restano separate e
+  invariate; solo l'algoritmo di tokenizzazione, filtro e
+  generazione delle query era duplicato ed è stato unificato.
+* Comportamento osservabile identico a prima della consolidazione,
+  verificato su una matrice di frasi rappresentative.
+* Aggiunta la suite tests/test_memory_query.py a copertura della
+  parità di comportamento e dell'helper condiviso.
+
+Regressione finale
+
+* Regressione finale completa: 13/13 aree verificate superate.
+* 28/28 unit test superati (tests/test_memory_invariants.py e
+  tests/test_memory_query.py).
+* Nessun blocker rilevato.
+* Dati reali in data/ verificati invariati al termine di ogni fase
+  di test.
+
+Stato
+
+Punto D della memoria persistente completato.
+Versione approvata dopo regressione finale e review indipendente.

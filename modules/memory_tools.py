@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+from modules.memory_query import estrai_query_da_testo
+
 from modules.memory import (
     MODALITA_DISABILITATA,
     MODALITA_NORMALE,
@@ -11,7 +13,7 @@ from modules.memory import (
     aggiungi_ricordo,
     aggiorna_ricordo,
     carica_archivio,
-    carica_cestino,
+    carica_cestino_con_recovery,
     cerca_memoria,
     elimina_ricordo,
     ripristina_ricordo,
@@ -38,11 +40,24 @@ STATUS_MEMORIA = frozenset({
     "pending_selection",
     "blocked_readonly",
     "blocked_disabled",
+    "blocked_sensitive",
     "not_found",
     "duplicate_detected",
     "conflict",
     "validation_error",
     "tool_error",
+})
+
+# Categorie neutre restituite dal rilevatore di contenuto sensibile.
+CATEGORIE_SENSIBILI = frozenset({
+    "password",
+    "api_key_or_token",
+    "pin",
+    "cvv",
+    "otp",
+    "payment_card",
+    "private_key",
+    "recovery_secret",
 })
 
 def crea_risultato_tool(
@@ -61,6 +76,7 @@ def crea_risultato_tool(
     after: str | None = None,
     candidates: list[dict] | None = None,
     source: str | None = None,
+    sensitive_category: str | None = None,
 ) -> dict:
     """
     Costruisce il risultato strutturato restituito da Python al modello.
@@ -127,6 +143,15 @@ def crea_risultato_tool(
             )
 
         risultato["source"] = source
+
+    if sensitive_category is not None:
+
+        if sensitive_category not in CATEGORIE_SENSIBILI:
+            raise ValueError(
+                f"Categoria sensibile non supportata: {sensitive_category}."
+            )
+
+        risultato["sensitive_category"] = sensitive_category
 
     return risultato
 
@@ -466,64 +491,221 @@ def prepara_selezione_memoria(
         source="persistent_memory",
     )
 
+STOPWORD_ELIMINAZIONE_MEMORIA = {
+    "il",
+    "lo",
+    "la",
+    "i",
+    "gli",
+    "le",
+    "un",
+    "uno",
+    "una",
+    "ricordo",
+    "ricordi",
+    "memoria",
+    "elimina",
+    "eliminare",
+    "cancella",
+    "cancellare",
+    "su",
+    "di",
+    "del",
+    "della",
+    "dei",
+    "delle",
+    "per",
+    "che",
+    "quello",
+    "quella",
+}
+
 def _genera_query_eliminazione(query: str) -> list[str]:
     """
     Genera fallback conservativi per una richiesta
     di eliminazione senza ID.
     """
 
-    parole = re.findall(
-        r"[a-zA-ZÀ-ÿ0-9_+-]+",
-        query.casefold(),
-    )
+    return estrai_query_da_testo(query, STOPWORD_ELIMINAZIONE_MEMORIA)
 
-    stopword = {
-        "il",
-        "lo",
-        "la",
-        "i",
-        "gli",
-        "le",
-        "un",
-        "uno",
-        "una",
-        "ricordo",
-        "ricordi",
-        "memoria",
-        "elimina",
-        "eliminare",
-        "cancella",
-        "cancellare",
-        "su",
-        "di",
-        "del",
-        "della",
-        "dei",
-        "delle",
-        "per",
-        "che",
-        "quello",
-        "quella",
-    }
 
-    significative = [
-        parola
-        for parola in parole
-        if parola not in stopword
-        and len(parola) >= 4
-    ]
+# ---------------------------------------------------------------
+# RILEVAMENTO CONTENUTO SENSIBILE (guardia lato Python, 0.5.3.2)
+#
+# Alta precisione: privilegia i falsi negativi rispetto ai falsi
+# positivi. Intercetta solo pattern con parola-chiave pertinente e
+# assegnazione esplicita a un valore plausibile (o marcatori/prefissi
+# strutturalmente inequivocabili). Non fa detection generica di
+# entropia: una stringa casuale senza contesto non viene bloccata.
+# ---------------------------------------------------------------
 
-    query_fallback = []
+_COPULA = r"(?:è|e'|:|=)"
 
-    for indice in range(len(significative) - 1):
-        query_fallback.append(
-            f"{significative[indice]} "
-            f"{significative[indice + 1]}"
-        )
+_PASSWORD_ESCLUSE = (
+    "manager", "generator", "dimenticata", "dimenticato",
+    "sicura", "sicuro", "complessa", "complesso",
+    "debole", "robusta", "robusto",
+)
 
-    query_fallback.extend(significative)
+_PASSWORD_PATTERN = re.compile(
+    r"\b(?:password|pw|pwd)\b"
+    r"(?!\s+(?:" + "|".join(_PASSWORD_ESCLUSE) + r")\b)"
+    r"[^.\n]{0,40}?"
+    rf"{_COPULA}\s*"
+    r"['\"]?([^\s'\".,;!?]{1,64})",
+    re.IGNORECASE,
+)
 
-    return query_fallback
+_TOKEN_PREFISSI_PATTERN = re.compile(
+    r"\bsk-[A-Za-z0-9]{16,}\b"
+    r"|\bgh[pousr]_[A-Za-z0-9]{16,}\b"
+    r"|\bAIza[0-9A-Za-z_\-]{16,}\b"
+    r"|\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"
+    r"|\bAKIA[0-9A-Z]{12,}\b"
+    r"|\bya29\.[0-9A-Za-z_\-]{16,}\b"
+)
+
+_TOKEN_KEYWORD_PATTERN = re.compile(
+    r"\b(?:api\s*key|token)\b"
+    r"[^.\n]{0,40}?"
+    rf"{_COPULA}\s*"
+    r"['\"]?([A-Za-z0-9_\-]{16,})",
+    re.IGNORECASE,
+)
+
+_PIN_PATTERN = re.compile(
+    rf"\bPIN\b[^.\n]{{0,40}}?{_COPULA}\s*['\"]?(\d{{4,6}})\b",
+    re.IGNORECASE,
+)
+
+_CVV_PATTERN = re.compile(
+    rf"\bCVV\b[^.\n]{{0,40}}?{_COPULA}\s*['\"]?(\d{{3,4}})\b",
+    re.IGNORECASE,
+)
+
+_OTP_PATTERN = re.compile(
+    r"\b(?:2FA|OTP|codice\s+di\s+verifica|codice\s+a\s+due\s+fattori)\b"
+    rf"[^.\n]{{0,40}}?{_COPULA}\s*['\"]?(\d{{4,8}})\b",
+    re.IGNORECASE,
+)
+
+_CARTA_KEYWORD_PATTERN = re.compile(
+    r"\b(?:carta(?:\s+di\s+(?:credito|debito))?|credit\s*card)\b",
+    re.IGNORECASE,
+)
+
+_CARTA_NUMERO_PATTERN = re.compile(r"[\d][\d \-]{11,25}[\d]")
+
+_PEM_PRIVATE_PATTERN = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"
+)
+
+_SEED_KEYWORD_PATTERN = re.compile(
+    r"\b(?:seed\s+phrase|recovery\s+phrase|mnemonic)\b",
+    re.IGNORECASE,
+)
+
+_SEED_WORDS_PATTERN = re.compile(
+    r"(?:\b[a-zà-ÿ]{3,8}\b[\s,]+){7,}\b[a-zà-ÿ]{3,8}\b",
+    re.IGNORECASE,
+)
+
+_RECOVERY_CODE_KEYWORD_PATTERN = re.compile(
+    r"\b(?:recovery\s+code|backup\s+code|codice\s+di\s+(?:recupero|backup))\b",
+    re.IGNORECASE,
+)
+
+_RECOVERY_CODE_VALUE_PATTERN = re.compile(
+    rf"[^.\n]{{0,40}}?{_COPULA}\s*['\"]?([A-Za-z0-9]{{4,6}}(?:-[A-Za-z0-9]{{4,6}})?)\b"
+)
+
+
+def _luhn_valido(numero: str) -> bool:
+    """Verifica l'algoritmo di Luhn su una sequenza di sole cifre."""
+
+    cifre = [int(carattere) for carattere in numero]
+    cifre.reverse()
+
+    totale = 0
+
+    for indice, cifra in enumerate(cifre):
+        if indice % 2 == 1:
+            cifra *= 2
+            if cifra > 9:
+                cifra -= 9
+
+        totale += cifra
+
+    return totale % 10 == 0
+
+
+def _numeri_carta_candidati(content: str) -> list[str]:
+    """Estrae sequenze numeriche di lunghezza plausibile per una carta."""
+
+    candidati = []
+
+    for corrispondenza in _CARTA_NUMERO_PATTERN.finditer(content):
+        pulito = re.sub(r"[^\d]", "", corrispondenza.group())
+
+        if 13 <= len(pulito) <= 19:
+            candidati.append(pulito)
+
+    return candidati
+
+
+def rileva_contenuto_sensibile(content: str) -> str | None:
+    """
+    Rileva in modo conservativo un contenuto molto probabilmente
+    sensibile (segreti, credenziali) prima che venga salvato.
+
+    Restituisce una categoria neutra oppure None. Calibrato per
+    l'alta precisione: un contenuto senza parola-chiave pertinente
+    o senza pattern strutturale inequivocabile non viene bloccato,
+    anche se potrebbe in teoria essere un segreto reale.
+    """
+
+    if not isinstance(content, str) or not content:
+        return None
+
+    if _PEM_PRIVATE_PATTERN.search(content):
+        return "private_key"
+
+    if _TOKEN_PREFISSI_PATTERN.search(content):
+        return "api_key_or_token"
+
+    if _TOKEN_KEYWORD_PATTERN.search(content):
+        return "api_key_or_token"
+
+    if _PASSWORD_PATTERN.search(content):
+        return "password"
+
+    if _PIN_PATTERN.search(content):
+        return "pin"
+
+    if _CVV_PATTERN.search(content):
+        return "cvv"
+
+    if _OTP_PATTERN.search(content):
+        return "otp"
+
+    if _CARTA_KEYWORD_PATTERN.search(content):
+        for candidato in _numeri_carta_candidati(content):
+            if _luhn_valido(candidato):
+                return "payment_card"
+
+    if (
+        _SEED_KEYWORD_PATTERN.search(content)
+        and _SEED_WORDS_PATTERN.search(content)
+    ):
+        return "recovery_secret"
+
+    if (
+        _RECOVERY_CODE_KEYWORD_PATTERN.search(content)
+        and _RECOVERY_CODE_VALUE_PATTERN.search(content)
+    ):
+        return "recovery_secret"
+
+    return None
 
 def esegui_tool_memoria(
     *,
@@ -619,6 +801,19 @@ def esegui_tool_memoria(
                     "Il parametro mode deve essere "
                     "'explicit' oppure 'proposal'."
                 ),
+            )
+
+        categoria_sensibile = rileva_contenuto_sensibile(content)
+        if categoria_sensibile is not None:
+            return crea_risultato_tool(
+                ok=False,
+                operation="create",
+                status="blocked_sensitive",
+                error=(
+                    "Non è stato salvato: il contenuto sembra "
+                    "includere un dato sensibile."
+                ),
+                sensitive_category=categoria_sensibile,
             )
 
         if stato_memoria.modalita == MODALITA_DISABILITATA:
@@ -743,6 +938,19 @@ def esegui_tool_memoria(
                 operation="update",
                 status="validation_error",
                 error="Il nuovo contenuto non è valido.",
+            )
+
+        categoria_sensibile = rileva_contenuto_sensibile(new_content)
+        if categoria_sensibile is not None:
+            return crea_risultato_tool(
+                ok=False,
+                operation="update",
+                status="blocked_sensitive",
+                error=(
+                    "Non è stata applicata: il nuovo contenuto sembra "
+                    "includere un dato sensibile."
+                ),
+                sensitive_category=categoria_sensibile,
             )
 
         if stato_memoria.modalita == MODALITA_DISABILITATA:
@@ -1012,23 +1220,30 @@ def esegui_tool_memoria(
             "deleted_memories.json"
         )
 
-        if not percorso_cestino.exists():
+        percorso_backup_cestino = percorso_cestino.with_name(
+            f"{percorso_cestino.stem}.backup{percorso_cestino.suffix}"
+        )
+
+        try:
+            cestino = carica_cestino_con_recovery(
+                percorso_cestino,
+                percorso_backup_cestino,
+            )
+        except (OSError, ValueError, RuntimeError) as errore:
+            return crea_risultato_tool(
+                ok=False,
+                operation="restore",
+                status="tool_error",
+                error=str(errore),
+            )
+
+        if cestino is None:
             return crea_risultato_tool(
                 ok=False,
                 operation="restore",
                 status="not_found",
                 memory_id=memory_id,
                 error="Il cestino non esiste.",
-            )
-
-        try:
-            cestino = carica_cestino(percorso_cestino)
-        except (OSError, ValueError) as errore:
-            return crea_risultato_tool(
-                ok=False,
-                operation="restore",
-                status="tool_error",
-                error=str(errore),
             )
 
         ricordo = _trova_ricordo_eliminato_per_id(cestino, memory_id)

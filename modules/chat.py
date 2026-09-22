@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from modules.memory import StatoMemoria
+from modules.memory_query import estrai_query_da_testo
 from modules.memory_session import MemorySessionState
 from modules.memory_tools import (
     TOOLS_MEMORIA,
@@ -122,77 +123,52 @@ def sembra_eliminazione_memoria_senza_id(domanda: str) -> bool:
         and not ha_id_esplicito
     )
 
+STOPWORD_RECALL_MEMORIA = {
+    "che",
+    "chi",
+    "cosa",
+    "come",
+    "dove",
+    "quando",
+    "quale",
+    "quali",
+    "qual",
+    "uso",
+    "usi",
+    "usa",
+    "usare",
+    "per",
+    "con",
+    "del",
+    "della",
+    "dei",
+    "delle",
+    "nel",
+    "nella",
+    "nei",
+    "nelle",
+    "il",
+    "lo",
+    "la",
+    "i",
+    "gli",
+    "le",
+    "un",
+    "uno",
+    "una",
+    "mio",
+    "mia",
+    "miei",
+    "mie",
+}
+
 def genera_query_memoria(domanda: str) -> list[str]:
     """
     Estrae query semplici e conservative dalla domanda
     per il fallback della ricerca memoria.
     """
 
-    parole = re.findall(
-        r"[a-zA-ZÀ-ÿ0-9_+-]+",
-        domanda.casefold(),
-    )
-
-    stopword = {
-        "che",
-        "chi",
-        "cosa",
-        "come",
-        "dove",
-        "quando",
-        "quale",
-        "quali",
-        "qual",
-        "uso",
-        "usi",
-        "usa",
-        "usare",
-        "per",
-        "con",
-        "del",
-        "della",
-        "dei",
-        "delle",
-        "nel",
-        "nella",
-        "nei",
-        "nelle",
-        "il",
-        "lo",
-        "la",
-        "i",
-        "gli",
-        "le",
-        "un",
-        "uno",
-        "una",
-        "mio",
-        "mia",
-        "miei",
-        "mie",
-    }
-
-    significative = [
-        parola
-        for parola in parole
-        if parola not in stopword
-        and len(parola) >= 4
-    ]
-
-    query = []
-
-    # Prima proviamo coppie specifiche:
-    # "progetto aster", "sistema operativo", ecc.
-    for indice in range(len(significative) - 1):
-        query.append(
-            f"{significative[indice]} "
-            f"{significative[indice + 1]}"
-        )
-
-    # Poi singole parole.
-    query.extend(significative)
-
-    return query
+    return estrai_query_da_testo(domanda, STOPWORD_RECALL_MEMORIA)
 
 def cerca_memoria_fallback(
     domanda: str,
@@ -349,6 +325,12 @@ def genera_risposta_deterministica_memoria(
 
     if status == "blocked_disabled":
         return "La memoria persistente è disabilitata."
+
+    if status == "blocked_sensitive":
+        return (
+            "Non ho salvato questo contenuto perché sembra "
+            "includere un dato sensibile."
+        )
 
     if status == "not_found":
         return error or "Non ho trovato il ricordo richiesto."
@@ -742,22 +724,29 @@ def avvia_chat(
             # RISPOSTA FINALE DOPO IL TOOL
             # -------------------------------------------------
 
-            try:
-                risposta_completa = genera_risposta_finale_memoria(
-                    modello=modello,
-                    messaggi=messaggi,
-                    host_ollama=host_ollama,
-                    timeout_ollama=timeout_ollama,
-                    risultato_tool=risultato_tool,
+            if risultato_tool.get("status") == "blocked_sensitive":
+                # Contenuto potenzialmente sensibile: nessun secondo
+                # giro Ollama, per non fargli mai vedere/ripetere il
+                # valore rilevato. Risposta locale deterministica.
+                risposta_completa = genera_risposta_deterministica_memoria(
+                    risultato_tool
                 )
-
-
-            except Exception:
-                risposta_completa = (
-                    genera_risposta_deterministica_memoria(
-                        risultato_tool
+            else:
+                try:
+                    risposta_completa = genera_risposta_finale_memoria(
+                        modello=modello,
+                        messaggi=messaggi,
+                        host_ollama=host_ollama,
+                        timeout_ollama=timeout_ollama,
+                        risultato_tool=risultato_tool,
                     )
-                )
+
+                except Exception:
+                    risposta_completa = (
+                        genera_risposta_deterministica_memoria(
+                            risultato_tool
+                        )
+                    )
 
             print(
                 f"\nAster: {risposta_completa}"

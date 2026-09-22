@@ -8,6 +8,10 @@ __pycache__/
 # VS Code
 .vscode/
 
+# Icona
+aster.ico
+Aster.spec
+
 # Logs
 logs/
 *.log
