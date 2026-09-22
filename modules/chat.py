@@ -350,6 +350,12 @@ def genera_risposta_deterministica_memoria(
     if status == "blocked_disabled":
         return "La memoria persistente è disabilitata."
 
+    if status == "blocked_sensitive":
+        return (
+            "Non ho salvato questo contenuto perché sembra "
+            "includere un dato sensibile."
+        )
+
     if status == "not_found":
         return error or "Non ho trovato il ricordo richiesto."
 
@@ -742,22 +748,29 @@ def avvia_chat(
             # RISPOSTA FINALE DOPO IL TOOL
             # -------------------------------------------------
 
-            try:
-                risposta_completa = genera_risposta_finale_memoria(
-                    modello=modello,
-                    messaggi=messaggi,
-                    host_ollama=host_ollama,
-                    timeout_ollama=timeout_ollama,
-                    risultato_tool=risultato_tool,
+            if risultato_tool.get("status") == "blocked_sensitive":
+                # Contenuto potenzialmente sensibile: nessun secondo
+                # giro Ollama, per non fargli mai vedere/ripetere il
+                # valore rilevato. Risposta locale deterministica.
+                risposta_completa = genera_risposta_deterministica_memoria(
+                    risultato_tool
                 )
-
-
-            except Exception:
-                risposta_completa = (
-                    genera_risposta_deterministica_memoria(
-                        risultato_tool
+            else:
+                try:
+                    risposta_completa = genera_risposta_finale_memoria(
+                        modello=modello,
+                        messaggi=messaggi,
+                        host_ollama=host_ollama,
+                        timeout_ollama=timeout_ollama,
+                        risultato_tool=risultato_tool,
                     )
-                )
+
+                except Exception:
+                    risposta_completa = (
+                        genera_risposta_deterministica_memoria(
+                            risultato_tool
+                        )
+                    )
 
             print(
                 f"\nAster: {risposta_completa}"
