@@ -15,6 +15,11 @@ from modules.ollama_manager import (
     esegui_turno_con_tools,
 )
 from modules.tool_registry import ContestoMemoria, crea_registro_memoria
+from modules.tool_response import (
+    genera_risposta_post_tool,
+    pulisci_testo_modello,
+    raccogli_risposta_finale,
+)
 
 TOOLS_RICERCA_MEMORIA = [
     tool
@@ -201,47 +206,6 @@ def cerca_memoria_fallback(
 
     return None
 
-def pulisci_testo_modello(testo: str) -> str:
-    """
-    Rimuove eventuale reasoning <think> sfuggito
-    dentro message.content.
-    """
-
-    if not testo:
-        return ""
-
-    pulito = re.sub(
-        r"<think\b[^>]*>.*?</think\s*>",
-        "",
-        testo,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-
-    # Caso difensivo osservato con alcuni modelli:
-    # reasoning senza tag iniziale ma con </think>.
-    minuscolo = pulito.casefold()
-    chiusura = "</think>"
-
-    if chiusura in minuscolo:
-        posizione = minuscolo.rfind(chiusura)
-
-        pulito = pulito[
-            posizione + len(chiusura):
-        ]
-
-    # Se rimane un <think> aperto senza chiusura,
-    # non mostriamo ciò che segue.
-    apertura = re.search(
-        r"<think\b[^>]*>",
-        pulito,
-        flags=re.IGNORECASE,
-    )
-
-    if apertura is not None:
-        pulito = pulito[:apertura.start()]
-
-    return pulito.strip()
-
 def genera_risposta_deterministica_memoria(
     risultato_tool: dict,
 ) -> str:
@@ -409,23 +373,22 @@ def genera_risposta_finale_memoria(
             risultato_tool
         )
 
-def raccogli_risposta_finale(stream) -> str:
+def _fallback_minimo_dominio_sconosciuto(risultato_tool: dict) -> str:
     """
-    Bufferizza completamente la risposta finale
-    prima di mostrarla.
+    Fallback minimo per un tool il cui dominio non e' riconosciuto.
+
+    Oggi l'unico caso raggiungibile e' un nome tool non registrato nel
+    registry (nessun dominio reale diverso da "memory" esiste ancora):
+    non tenta di interpretare il contenuto del risultato, restituisce
+    solo l'errore se presente o un messaggio neutro.
     """
 
-    parti = []
+    error = risultato_tool.get("error")
 
-    for parte in stream:
-        contenuto = parte.message.content or ""
+    if error:
+        return error
 
-        if contenuto:
-            parti.append(contenuto)
-
-    return pulisci_testo_modello(
-        "".join(parti)
-    )
+    return "Non riesco a gestire questa richiesta."
 
 def limita_cronologia(
     messaggi: list[dict[str, str]],
@@ -736,32 +699,27 @@ def avvia_chat(
             # RISPOSTA FINALE DOPO IL TOOL
             # -------------------------------------------------
 
-            if (
-                dominio_tool == "memory"
-                and risultato_tool.get("status") == "blocked_sensitive"
-            ):
+            if dominio_tool == "memory":
                 # Contenuto potenzialmente sensibile: nessun secondo
                 # giro Ollama, per non fargli mai vedere/ripetere il
                 # valore rilevato. Risposta locale deterministica.
-                risposta_completa = genera_risposta_deterministica_memoria(
-                    risultato_tool
+                salta_secondo_giro = (
+                    risultato_tool.get("status") == "blocked_sensitive"
                 )
+                fallback_deterministico = genera_risposta_deterministica_memoria
             else:
-                try:
-                    risposta_completa = genera_risposta_finale_memoria(
-                        modello=modello,
-                        messaggi=messaggi,
-                        host_ollama=host_ollama,
-                        timeout_ollama=timeout_ollama,
-                        risultato_tool=risultato_tool,
-                    )
+                salta_secondo_giro = False
+                fallback_deterministico = _fallback_minimo_dominio_sconosciuto
 
-                except Exception:
-                    risposta_completa = (
-                        genera_risposta_deterministica_memoria(
-                            risultato_tool
-                        )
-                    )
+            risposta_completa = genera_risposta_post_tool(
+                modello=modello,
+                messaggi=messaggi,
+                host_ollama=host_ollama,
+                timeout_ollama=timeout_ollama,
+                risultato_tool=risultato_tool,
+                salta_secondo_giro=salta_secondo_giro,
+                fallback_deterministico=fallback_deterministico,
+            )
 
             print(
                 f"\nAster: {risposta_completa}"
