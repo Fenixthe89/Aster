@@ -14,6 +14,10 @@ from modules.ollama_manager import (
     esegui_risposta_finale,
     esegui_turno_con_tools,
 )
+from modules.system_tools import (
+    fallback_deterministico_sistema,
+    registra_tool_sistema,
+)
 from modules.tool_registry import ContestoMemoria, crea_registro_memoria
 from modules.tool_response import (
     genera_risposta_post_tool,
@@ -430,6 +434,7 @@ def avvia_chat(
     stato_sessione = MemorySessionState()
 
     registro_strumenti = crea_registro_memoria()
+    registra_tool_sistema(registro_strumenti)
 
     contesto_strumenti = ContestoMemoria(
         stato_memoria=stato_memoria,
@@ -707,6 +712,9 @@ def avvia_chat(
                     risultato_tool.get("status") == "blocked_sensitive"
                 )
                 fallback_deterministico = genera_risposta_deterministica_memoria
+            elif dominio_tool == "system":
+                salta_secondo_giro = False
+                fallback_deterministico = fallback_deterministico_sistema
             else:
                 salta_secondo_giro = False
                 fallback_deterministico = _fallback_minimo_dominio_sconosciuto
