@@ -22,5 +22,11 @@
     "files": {
         "prompt": "prompt.txt",
         "memory": "data/memory.json"
+    },
+
+    "tools": {
+        "filesystem": {
+            "allowed_roots": []
+        }
     }
 }

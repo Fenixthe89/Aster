@@ -3,6 +3,12 @@ import json
 import re
 from pathlib import Path
 
+from modules.config import carica_config
+from modules.file_tools import (
+    fallback_deterministico_file,
+    prepara_contesto_filesystem,
+    registra_tool_filesystem,
+)
 from modules.memory import StatoMemoria
 from modules.memory_query import estrai_query_da_testo
 from modules.memory_session import MemorySessionState
@@ -24,6 +30,11 @@ from modules.tool_response import (
     pulisci_testo_modello,
     raccogli_risposta_finale,
 )
+
+# Root dell'installazione di Aster (modules/chat.py -> radice progetto),
+# usata SOLO per risolvere le root filesystem relative di config.json
+# (es. "./workspace"), mai per assumere una directory di lavoro corrente.
+_BASE_DIR = Path(__file__).resolve().parent.parent
 
 TOOLS_RICERCA_MEMORIA = [
     tool
@@ -435,6 +446,7 @@ def avvia_chat(
 
     registro_strumenti = crea_registro_memoria()
     registra_tool_sistema(registro_strumenti)
+    registra_tool_filesystem(registro_strumenti)
 
     contesto_strumenti = ContestoMemoria(
         stato_memoria=stato_memoria,
@@ -442,6 +454,13 @@ def avvia_chat(
         percorso_memoria=percorso_memoria,
         limite_ricerca=limite_ricerca,
     )
+
+    # Le root filesystem autorizzate vivono in config.json
+    # (tools.filesystem.allowed_roots); avvia_chat non riceve ancora il
+    # config grezzo dal chiamante, quindi lo rilegge qui una volta sola
+    # all'avvio della sessione, in modo self-contained.
+    config_filesystem = carica_config(_BASE_DIR / "config.json")
+    contesto_filesystem = prepara_contesto_filesystem(config_filesystem, _BASE_DIR)
 
     while True:
         try:
@@ -665,10 +684,19 @@ def avvia_chat(
                 risposta.message
             )
 
+            # Il registry inoltra un contesto opaco all'handler: per il
+            # dominio filesystem serve quello con le root autorizzate,
+            # non lo stato memoria (che gli handler filesystem non
+            # userebbero comunque).
+            if dominio_tool == "filesystem":
+                contesto_dispatch = contesto_filesystem
+            else:
+                contesto_dispatch = contesto_strumenti
+
             risultato_tool = registro_strumenti.dispatch(
                 nome_tool,
                 argomenti,
-                contesto_strumenti,
+                contesto_dispatch,
             )
             if (
                 nome_tool == "cerca_memoria"
@@ -715,6 +743,12 @@ def avvia_chat(
             elif dominio_tool == "system":
                 salta_secondo_giro = False
                 fallback_deterministico = fallback_deterministico_sistema
+            elif dominio_tool == "filesystem":
+                # Nessun risultato di list_directory richiede ancora di
+                # saltare il secondo giro (nessun concetto di file
+                # sensibile in questo sotto-step, solo list_directory).
+                salta_secondo_giro = False
+                fallback_deterministico = fallback_deterministico_file
             else:
                 salta_secondo_giro = False
                 fallback_deterministico = _fallback_minimo_dominio_sconosciuto

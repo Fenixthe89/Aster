@@ -64,4 +64,34 @@ def carica_config(config_file: Path) -> dict:
                 "maggiore di 0."
             )
 
+    # Il campo tools.filesystem.allowed_roots è opzionale (compatibilità
+    # con config.json precedenti): se assente equivale a lista vuota,
+    # cioè nessun accesso filesystem (default deny). Qui si valida solo
+    # la forma grezza (lista di stringhe): la semantica di dominio
+    # (path assoluti/relativi, esistenza, containment) non appartiene a
+    # questo modulo.
+    tools_config = config.get("tools", {})
+    if not isinstance(tools_config, dict):
+        tools_config = {}
+
+    filesystem_config = tools_config.get("filesystem", {})
+    if not isinstance(filesystem_config, dict):
+        filesystem_config = {}
+
+    allowed_roots_raw = filesystem_config.get("allowed_roots")
+
+    if allowed_roots_raw is not None:
+        if not isinstance(allowed_roots_raw, list):
+            raise TypeError(
+                "Il campo 'tools.filesystem.allowed_roots' in config.json "
+                "deve essere una lista."
+            )
+
+        for elemento in allowed_roots_raw:
+            if not isinstance(elemento, str):
+                raise TypeError(
+                    "Ogni elemento di 'tools.filesystem.allowed_roots' in "
+                    "config.json deve essere una stringa."
+                )
+
     return config
