@@ -64,6 +64,28 @@ def carica_config(config_file: Path) -> dict:
                 "maggiore di 0."
             )
 
+    # Il campo num_ctx è opzionale (compatibilità con config.json
+    # precedenti): se manca, il chiamante userà il default (8192). Qui
+    # si valida solo la forma (intero positivo): nessun limite legato a
+    # un modello specifico, per restare utilizzabile con modelli futuri.
+    if "num_ctx" in config["ollama"]:
+        num_ctx = config["ollama"]["num_ctx"]
+
+        if (
+            isinstance(num_ctx, bool)
+            or not isinstance(num_ctx, int)
+        ):
+            raise TypeError(
+                "Il campo 'ollama.num_ctx' in config.json deve essere "
+                "un numero intero."
+            )
+
+        if num_ctx <= 0:
+            raise ValueError(
+                "Il campo 'ollama.num_ctx' in config.json deve essere "
+                "maggiore di 0."
+            )
+
     # Il campo tools.filesystem.allowed_roots è opzionale (compatibilità
     # con config.json precedenti): se assente equivale a lista vuota,
     # cioè nessun accesso filesystem (default deny). Qui si valida solo

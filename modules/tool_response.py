@@ -73,6 +73,7 @@ def genera_risposta_post_tool(
     messaggi: list,
     host_ollama: str,
     timeout_ollama: float,
+    num_ctx: int = 8192,
     risultato_tool: dict,
     salta_secondo_giro: bool,
     fallback_deterministico: Callable[[dict], str],
@@ -96,6 +97,7 @@ def genera_risposta_post_tool(
             messaggi,
             host_ollama,
             timeout_ollama,
+            num_ctx,
         )
 
         return raccogli_risposta_finale(stream)

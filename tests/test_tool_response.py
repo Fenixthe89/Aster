@@ -50,8 +50,9 @@ class ContatoreChiamate:
         self.chiamate = 0
         self._comportamento = comportamento
 
-    def __call__(self, modello, messaggi, host_ollama, timeout_ollama):
+    def __call__(self, modello, messaggi, host_ollama, timeout_ollama, num_ctx):
         self.chiamate += 1
+        self.ultimo_num_ctx = num_ctx
         return self._comportamento()
 
 
@@ -159,6 +160,47 @@ class TestGeneraRispostaPostTool(unittest.TestCase):
 
         self.assertEqual(risposta, "Ciao mondo")
         self.assertEqual(contatore.chiamate, 1)
+
+    def test_num_ctx_esplicito_propagato_a_esegui_risposta_finale(self):
+        contatore = ContatoreChiamate(lambda: iter([_messaggio("ok")]))
+
+        originale = tool_response.esegui_risposta_finale
+        tool_response.esegui_risposta_finale = contatore
+        try:
+            genera_risposta_post_tool(
+                modello="qwen3:8b",
+                messaggi=[],
+                host_ollama="http://localhost:11434",
+                timeout_ollama=60,
+                num_ctx=12345,
+                risultato_tool={"ok": True},
+                salta_secondo_giro=False,
+                fallback_deterministico=lambda r: "non deve essere usato",
+            )
+        finally:
+            tool_response.esegui_risposta_finale = originale
+
+        self.assertEqual(contatore.ultimo_num_ctx, 12345)
+
+    def test_num_ctx_default_se_non_specificato(self):
+        contatore = ContatoreChiamate(lambda: iter([_messaggio("ok")]))
+
+        originale = tool_response.esegui_risposta_finale
+        tool_response.esegui_risposta_finale = contatore
+        try:
+            genera_risposta_post_tool(
+                modello="qwen3:8b",
+                messaggi=[],
+                host_ollama="http://localhost:11434",
+                timeout_ollama=60,
+                risultato_tool={"ok": True},
+                salta_secondo_giro=False,
+                fallback_deterministico=lambda r: "non deve essere usato",
+            )
+        finally:
+            tool_response.esegui_risposta_finale = originale
+
+        self.assertEqual(contatore.ultimo_num_ctx, 8192)
 
     def test_secondo_giro_fallito_chiama_fallback_senza_propagare(self):
         def esegui_risposta_finale_che_fallisce(*args, **kwargs):

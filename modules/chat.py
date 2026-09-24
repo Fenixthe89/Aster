@@ -364,6 +364,7 @@ def genera_risposta_finale_memoria(
     messaggi: list,
     host_ollama: str,
     timeout_ollama: float,
+    num_ctx: int = 8192,
     risultato_tool: dict,
 ) -> str:
     """
@@ -377,6 +378,7 @@ def genera_risposta_finale_memoria(
             messaggi,
             host_ollama,
             timeout_ollama,
+            num_ctx,
         )
 
         return raccogli_risposta_finale(
@@ -429,6 +431,7 @@ def avvia_chat(
     max_messaggi: int,
     host_ollama: str,
     timeout_ollama: float,
+    num_ctx: int,
     stato_memoria: StatoMemoria,
     percorso_memoria: Path,
     limite_ricerca: int,
@@ -492,6 +495,7 @@ def avvia_chat(
                 registro_strumenti.elenco_schema(),
                 host_ollama,
                 timeout_ollama,
+                num_ctx,
             )
 
             tool_calls = risposta.message.tool_calls or []
@@ -562,6 +566,7 @@ def avvia_chat(
                         messaggi=messaggi_memoria,
                         host_ollama=host_ollama,
                         timeout_ollama=timeout_ollama,
+                        num_ctx=num_ctx,
                         risultato_tool=risultato_memoria,
                     )
 
@@ -619,6 +624,7 @@ def avvia_chat(
                             messaggi=messaggi_memoria,
                             host_ollama=host_ollama,
                             timeout_ollama=timeout_ollama,
+                            num_ctx=num_ctx,
                             risultato_tool=risultato_memoria,
                         )
 
@@ -744,10 +750,15 @@ def avvia_chat(
                 salta_secondo_giro = False
                 fallback_deterministico = fallback_deterministico_sistema
             elif dominio_tool == "filesystem":
-                # Nessun risultato di list_directory richiede ancora di
-                # saltare il secondo giro (nessun concetto di file
-                # sensibile in questo sotto-step, solo list_directory).
-                salta_secondo_giro = False
+                # File classificato sensibile (per nome o per contenuto):
+                # read_file non mette mai il contenuto in risultato_tool
+                # in questo caso, quindi role="tool" e' già sicuro; qui
+                # evitiamo comunque il secondo giro Ollama, per non
+                # fargli mai ragionare o commentare su un blocco di
+                # sicurezza. Risposta locale deterministica.
+                salta_secondo_giro = (
+                    risultato_tool.get("status") == "sensitive_file"
+                )
                 fallback_deterministico = fallback_deterministico_file
             else:
                 salta_secondo_giro = False
@@ -758,6 +769,7 @@ def avvia_chat(
                 messaggi=messaggi,
                 host_ollama=host_ollama,
                 timeout_ollama=timeout_ollama,
+                num_ctx=num_ctx,
                 risultato_tool=risultato_tool,
                 salta_secondo_giro=salta_secondo_giro,
                 fallback_deterministico=fallback_deterministico,

@@ -97,7 +97,7 @@ class ContatoreChiamate:
         self.chiamate = 0
         self._comportamento = comportamento
 
-    def __call__(self, modello, messaggi, host_ollama, timeout_ollama):
+    def __call__(self, modello, messaggi, host_ollama, timeout_ollama, num_ctx):
         self.chiamate += 1
         return self._comportamento()
 
