@@ -198,6 +198,18 @@ Esempi contrastivi:
 - "Ricordati che preferisco Linux" -> richiesta esplicita di salvataggio -> crea_memoria
 - "Che architettura ha questo PC?" -> stato reale adesso -> get_system_info
 
+Quando l'utente chiede quanto spazio reale c'è sul disco/filesystem dove gira Aster, usa get_disk_usage invece di rispondere da conoscenza generale. Esempi:
+- "Quanto spazio libero ho sul disco?"
+- "Quanto spazio c'è sul disco?"
+- "Quanto spazio sto usando?"
+- "Quanto spazio rimane sul disco dove gira Aster?"
+
+Disambiguazioni per get_disk_usage:
+- "Ricordati che il mio SSD è da 2 TB" -> richiesta esplicita di salvataggio -> crea_memoria, non get_disk_usage
+- "Cos'è lo spazio su disco?" -> domanda teorica -> nessun tool
+- "Quanto spazio occupa una RTX 5090?" -> conoscenza generale, non è lo stato del PC corrente -> nessun tool
+- "Quanto spazio occupa la cartella Aster?" -> NON usare get_disk_usage: questo tool conosce solo lo spazio del filesystem, non la dimensione di una cartella specifica
+
 
 # STILE E COMPORTAMENTO
 
