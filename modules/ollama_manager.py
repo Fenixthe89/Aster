@@ -85,6 +85,7 @@ def avvia_stream(
     messaggi: list[dict],
     host: str = "http://localhost:11434",
     timeout: float = 60,
+    num_ctx: int = 8192,
 ):
     """Avvia lo streaming normale della risposta."""
 
@@ -95,6 +96,7 @@ def avvia_stream(
         messages=messaggi,
         stream=True,
         think=False,
+        options={"num_ctx": num_ctx},
     )
 
 
@@ -104,6 +106,7 @@ def esegui_turno_con_tools(
     tools: list[dict],
     host: str,
     timeout: float = 60,
+    num_ctx: int = 8192,
 ):
     """
     Esegue il primo giro LLM con tool disponibili.
@@ -121,6 +124,7 @@ def esegui_turno_con_tools(
         tools=tools,
         stream=False,
         think=False,
+        options={"num_ctx": num_ctx},
     )
 
 
@@ -129,6 +133,7 @@ def esegui_risposta_finale(
     messaggi: list[dict],
     host: str,
     timeout: float = 60,
+    num_ctx: int = 8192,
 ):
     """
     Genera la risposta finale dopo l'esecuzione di un tool.
@@ -143,4 +148,5 @@ def esegui_risposta_finale(
         messages=messaggi,
         stream=True,
         think=False,
+        options={"num_ctx": num_ctx},
     )

@@ -1,13 +1,14 @@
 {
     "assistant": {
         "name": "Aster",
-        "version": "0.5.3"
+        "version": "0.6.8"
     },
 
     "ollama": {
         "model": "qwen3:8b",
         "host": "http://localhost:11434",
-        "timeout": 60
+        "timeout": 60,
+        "num_ctx": 8192
     },
 
     "chat": {
@@ -22,5 +23,11 @@
     "files": {
         "prompt": "prompt.txt",
         "memory": "data/memory.json"
+    },
+
+    "tools": {
+        "filesystem": {
+            "allowed_roots": []
+        }
     }
 }

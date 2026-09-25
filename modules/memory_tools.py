@@ -60,6 +60,25 @@ CATEGORIE_SENSIBILI = frozenset({
     "recovery_secret",
 })
 
+_ERRORE_ACCESSO_ARCHIVIO = "Errore di accesso all'archivio della memoria."
+
+
+def _messaggio_errore_sicuro(errore: Exception) -> str:
+    """
+    Testo di errore da inserire nel risultato tool.
+
+    Un OSError puo' contenere il path reale dell'archivio memoria:
+    viene sostituito da un messaggio fisso. ValueError, RuntimeError e
+    TypeError generati da Aster restano invariati, perche' sono
+    messaggi applicativi utili (es. ricordo non trovato).
+    """
+
+    if isinstance(errore, OSError):
+        return _ERRORE_ACCESSO_ARCHIVIO
+
+    return str(errore)
+
+
 def crea_risultato_tool(
     *,
     ok: bool,
@@ -759,14 +778,14 @@ def esegui_tool_memoria(
                 ok=False,
                 operation="search",
                 status="validation_error",
-                error=str(errore),
+                error=_messaggio_errore_sicuro(errore),
             )
         except OSError as errore:
             return crea_risultato_tool(
                 ok=False,
                 operation="search",
                 status="tool_error",
-                error=str(errore),
+                error=_messaggio_errore_sicuro(errore),
             )
 
         return crea_risultato_tool(
@@ -842,7 +861,7 @@ def esegui_tool_memoria(
                 ok=False,
                 operation="create",
                 status="tool_error",
-                error=str(errore),
+                error=_messaggio_errore_sicuro(errore),
             )
 
         duplicato = _trova_duplicato_esatto(memoria, content)
@@ -899,7 +918,7 @@ def esegui_tool_memoria(
                 ok=False,
                 operation="create",
                 status="tool_error",
-                error=str(errore),
+                error=_messaggio_errore_sicuro(errore),
             )
 
         pending = stato_sessione.pending_action
@@ -976,7 +995,7 @@ def esegui_tool_memoria(
                 ok=False,
                 operation="update",
                 status="tool_error",
-                error=str(errore),
+                error=_messaggio_errore_sicuro(errore),
             )
 
         ricordo = _trova_ricordo_per_id(memoria, memory_id)
@@ -1069,7 +1088,7 @@ def esegui_tool_memoria(
                 ok=False,
                 operation="delete",
                 status="validation_error",
-                error=str(errore),
+                error=_messaggio_errore_sicuro(errore),
             )
 
         except OSError as errore:
@@ -1077,7 +1096,7 @@ def esegui_tool_memoria(
                 ok=False,
                 operation="delete",
                 status="tool_error",
-                error=str(errore),
+                error=_messaggio_errore_sicuro(errore),
             )
 
         candidati = risultato["results"]
@@ -1142,7 +1161,7 @@ def esegui_tool_memoria(
                 ok=False,
                 operation="delete",
                 status="tool_error",
-                error=str(errore),
+                error=_messaggio_errore_sicuro(errore),
             )
 
         ricordo = _trova_ricordo_per_id(memoria, memory_id)
@@ -1234,7 +1253,7 @@ def esegui_tool_memoria(
                 ok=False,
                 operation="restore",
                 status="tool_error",
-                error=str(errore),
+                error=_messaggio_errore_sicuro(errore),
             )
 
         if cestino is None:
@@ -1469,7 +1488,7 @@ def esegui_tool_memoria(
                     ok=False,
                     operation="create",
                     status="tool_error",
-                    error=str(errore),
+                    error=_messaggio_errore_sicuro(errore),
                 )
 
             annulla_pending(stato_sessione)
@@ -1502,7 +1521,7 @@ def esegui_tool_memoria(
                     ok=False,
                     operation="update",
                     status="tool_error",
-                    error=str(errore),
+                    error=_messaggio_errore_sicuro(errore),
                 )
 
             before = pending.before
@@ -1542,7 +1561,7 @@ def esegui_tool_memoria(
                     ok=False,
                     operation="delete",
                     status="tool_error",
-                    error=str(errore),
+                    error=_messaggio_errore_sicuro(errore),
                 )
 
             annulla_pending(stato_sessione)
@@ -1579,7 +1598,7 @@ def esegui_tool_memoria(
                     ok=False,
                     operation="restore",
                     status="tool_error",
-                    error=str(errore),
+                    error=_messaggio_errore_sicuro(errore),
                 )
 
             annulla_pending(stato_sessione)

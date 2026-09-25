@@ -3,6 +3,12 @@ import json
 import re
 from pathlib import Path
 
+from modules.config import carica_config
+from modules.file_tools import (
+    fallback_deterministico_file,
+    prepara_contesto_filesystem,
+    registra_tool_filesystem,
+)
 from modules.memory import StatoMemoria
 from modules.memory_query import estrai_query_da_testo
 from modules.memory_session import MemorySessionState
@@ -14,6 +20,21 @@ from modules.ollama_manager import (
     esegui_risposta_finale,
     esegui_turno_con_tools,
 )
+from modules.system_tools import (
+    fallback_deterministico_sistema,
+    registra_tool_sistema,
+)
+from modules.tool_registry import ContestoMemoria, crea_registro_memoria
+from modules.tool_response import (
+    genera_risposta_post_tool,
+    pulisci_testo_modello,
+    raccogli_risposta_finale,
+)
+
+# Root dell'installazione di Aster (modules/chat.py -> radice progetto),
+# usata SOLO per risolvere le root filesystem relative di config.json
+# (es. "./workspace"), mai per assumere una directory di lavoro corrente.
+_BASE_DIR = Path(__file__).resolve().parent.parent
 
 TOOLS_RICERCA_MEMORIA = [
     tool
@@ -200,47 +221,6 @@ def cerca_memoria_fallback(
 
     return None
 
-def pulisci_testo_modello(testo: str) -> str:
-    """
-    Rimuove eventuale reasoning <think> sfuggito
-    dentro message.content.
-    """
-
-    if not testo:
-        return ""
-
-    pulito = re.sub(
-        r"<think\b[^>]*>.*?</think\s*>",
-        "",
-        testo,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-
-    # Caso difensivo osservato con alcuni modelli:
-    # reasoning senza tag iniziale ma con </think>.
-    minuscolo = pulito.casefold()
-    chiusura = "</think>"
-
-    if chiusura in minuscolo:
-        posizione = minuscolo.rfind(chiusura)
-
-        pulito = pulito[
-            posizione + len(chiusura):
-        ]
-
-    # Se rimane un <think> aperto senza chiusura,
-    # non mostriamo ciò che segue.
-    apertura = re.search(
-        r"<think\b[^>]*>",
-        pulito,
-        flags=re.IGNORECASE,
-    )
-
-    if apertura is not None:
-        pulito = pulito[:apertura.start()]
-
-    return pulito.strip()
-
 def genera_risposta_deterministica_memoria(
     risultato_tool: dict,
 ) -> str:
@@ -384,6 +364,7 @@ def genera_risposta_finale_memoria(
     messaggi: list,
     host_ollama: str,
     timeout_ollama: float,
+    num_ctx: int = 8192,
     risultato_tool: dict,
 ) -> str:
     """
@@ -397,6 +378,7 @@ def genera_risposta_finale_memoria(
             messaggi,
             host_ollama,
             timeout_ollama,
+            num_ctx,
         )
 
         return raccogli_risposta_finale(
@@ -408,40 +390,258 @@ def genera_risposta_finale_memoria(
             risultato_tool
         )
 
-def raccogli_risposta_finale(stream) -> str:
+def _fallback_minimo_dominio_sconosciuto(risultato_tool: dict) -> str:
     """
-    Bufferizza completamente la risposta finale
-    prima di mostrarla.
+    Fallback minimo per un tool il cui dominio non e' riconosciuto.
+
+    Oggi l'unico caso raggiungibile e' un nome tool non registrato nel
+    registry (nessun dominio reale diverso da "memory" esiste ancora):
+    non tenta di interpretare il contenuto del risultato, restituisce
+    solo l'errore se presente o un messaggio neutro.
     """
 
-    parti = []
+    error = risultato_tool.get("error")
 
-    for parte in stream:
-        contenuto = parte.message.content or ""
+    if error:
+        return error
 
-        if contenuto:
-            parti.append(contenuto)
+    return "Non riesco a gestire questa richiesta."
 
-    return pulisci_testo_modello(
-        "".join(parti)
+# ---------------------------------------------------------------------
+# Budget della cronologia (0.6.8)
+# ---------------------------------------------------------------------
+# Rete di sicurezza pratica, NON una garanzia token-safe: i caratteri
+# non sono token (es. le cifre valgono circa un token ciascuna).
+SOGLIA_COMPATTAZIONE_TOOL = 1000
+SOGLIA_COMPATTAZIONE_RISPOSTA = 2000
+MAX_CARATTERI_CRONOLOGIA = 6000
+
+# Placeholder fisso per un risultato tool non JSON: nessun dato originale.
+PLACEHOLDER_TOOL_OMESSO = '{"omitted_from_history": true}'
+PLACEHOLDER_RISPOSTA_OMESSA = (
+    "[Risposta precedente basata su un risultato tool voluminoso. "
+    "Richiamare lo strumento se servono di nuovo i dettagli.]"
+)
+
+_CAMPI_TOOL_CONSERVATI = ("ok", "operation", "status")
+
+
+def _campo(messaggio, nome: str):
+    """Legge un campo sia da un dict sia da un messaggio ollama (oggetto)."""
+
+    if isinstance(messaggio, dict):
+        return messaggio.get(nome)
+    return getattr(messaggio, nome, None)
+
+
+def _ha_tool_calls(messaggio) -> bool:
+    return _campo(messaggio, "role") == "assistant" and bool(
+        _campo(messaggio, "tool_calls")
     )
 
+
+def _dimensione_messaggio(messaggio) -> int:
+    """Caratteri di un messaggio: contenuto più nome/argomenti delle tool call."""
+
+    dimensione = len(_campo(messaggio, "content") or "")
+
+    for chiamata in _campo(messaggio, "tool_calls") or []:
+        funzione = _campo(chiamata, "function")
+        dimensione += len(str(_campo(funzione, "name") or ""))
+        dimensione += len(str(_campo(funzione, "arguments") or ""))
+
+    return dimensione
+
+
+def _tool_gia_compattato(contenuto: str) -> bool:
+    try:
+        dati = json.loads(contenuto)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(dati, dict) and dati.get("omitted_from_history") is True
+
+
+def _compatta_contenuto_tool(contenuto: str) -> str:
+    """
+    Rappresentazione minima di un risultato tool voluminoso.
+
+    Conserva solo ok/operation/status (se presenti) più il marcatore
+    omitted_from_history: mai data, content, processes, entries, path
+    o testo di errore.
+    """
+
+    try:
+        dati = json.loads(contenuto)
+    except (TypeError, ValueError):
+        return PLACEHOLDER_TOOL_OMESSO
+
+    if not isinstance(dati, dict):
+        return PLACEHOLDER_TOOL_OMESSO
+
+    minimo = {
+        campo: dati[campo]
+        for campo in _CAMPI_TOOL_CONSERVATI
+        if campo in dati and isinstance(dati[campo], (bool, str))
+    }
+    minimo["omitted_from_history"] = True
+
+    return json.dumps(minimo, ensure_ascii=False)
+
+
+def _con_contenuto(messaggio: dict, contenuto: str) -> dict:
+    """Copia del messaggio con nuovo contenuto (mai mutazione in place)."""
+
+    nuovo = dict(messaggio)
+    nuovo["content"] = contenuto
+    return nuovo
+
+
+def _dividi_in_turni(conversazione: list) -> list[list]:
+    """
+    Divide la conversazione in blocchi-turno, ognuno aperto da un
+    messaggio user. I messaggi prima del primo user (pezzi di un
+    turno già tagliato) vengono scartati.
+    """
+
+    turni = []
+
+    for messaggio in conversazione:
+        if _campo(messaggio, "role") == "user":
+            turni.append([messaggio])
+        elif turni:
+            turni[-1].append(messaggio)
+
+    return turni
+
+
+def _turno_coerente(turno: list) -> bool:
+    """
+    Un turno è coerente se: inizia con user; ogni role=tool segue una
+    tool call assistant (o un altro tool); ogni tool call assistant è
+    seguita da almeno un role=tool; non contiene altri ruoli.
+    """
+
+    if not turno or _campo(turno[0], "role") != "user":
+        return False
+
+    for indice in range(1, len(turno)):
+        messaggio = turno[indice]
+        ruolo = _campo(messaggio, "role")
+        precedente = turno[indice - 1]
+
+        if ruolo == "tool":
+            if not (
+                _ha_tool_calls(precedente)
+                or _campo(precedente, "role") == "tool"
+            ):
+                return False
+        elif ruolo == "assistant":
+            if _ha_tool_calls(messaggio):
+                successivo = turno[indice + 1] if indice + 1 < len(turno) else None
+                if successivo is None or _campo(successivo, "role") != "tool":
+                    return False
+        else:
+            return False
+
+    return True
+
+
+def _compatta_turno(turno: list) -> list:
+    """
+    Compatta i role=tool voluminosi e, nei soli turni con un tool
+    compattato, anche la risposta finale assistant troppo lunga (che
+    potrebbe ripetere il contenuto del tool, es. read_file).
+    """
+
+    risultato = []
+    turno_pesante = False
+
+    for messaggio in turno:
+        if (
+            isinstance(messaggio, dict)
+            and messaggio.get("role") == "tool"
+            and isinstance(messaggio.get("content"), str)
+        ):
+            contenuto = messaggio["content"]
+            if _tool_gia_compattato(contenuto):
+                turno_pesante = True
+            elif len(contenuto) > SOGLIA_COMPATTAZIONE_TOOL:
+                messaggio = _con_contenuto(
+                    messaggio,
+                    _compatta_contenuto_tool(contenuto),
+                )
+                turno_pesante = True
+
+        risultato.append(messaggio)
+
+    if not turno_pesante:
+        return risultato
+
+    for indice, messaggio in enumerate(risultato):
+        if (
+            isinstance(messaggio, dict)
+            and messaggio.get("role") == "assistant"
+            and not messaggio.get("tool_calls")
+            and len(messaggio.get("content") or "") > SOGLIA_COMPATTAZIONE_RISPOSTA
+        ):
+            risultato[indice] = _con_contenuto(
+                messaggio,
+                PLACEHOLDER_RISPOSTA_OMESSA,
+            )
+
+    return risultato
+
+
 def limita_cronologia(
-    messaggi: list[dict[str, str]],
+    messaggi: list,
     max_messaggi: int,
 ) -> None:
     """
-    Mantiene sempre il messaggio di sistema e soltanto
-    gli ultimi messaggi della conversazione.
+    Mantiene sempre il messaggio di sistema e una cronologia limitata.
+
+    Ordine: divisione in turni interi (scarta pezzi iniziali orfani e
+    turni incoerenti) -> compattazione dei risultati tool voluminosi ->
+    limite per numero di messaggi -> limite per caratteri. I tagli
+    avvengono sempre per turni interi, mai a metà turno. L'ultimo
+    turno (che contiene il messaggio user corrente) resta sempre.
     """
 
     messaggio_sistema = messaggi[0]
-    conversazione = messaggi[1:]
+    turni = _dividi_in_turni(messaggi[1:])
 
-    if len(conversazione) > max_messaggi:
-        conversazione = conversazione[-max_messaggi:]
+    if not turni:
+        messaggi[:] = [messaggio_sistema]
+        return
 
-    messaggi[:] = [messaggio_sistema, *conversazione]
+    ultimo = turni[-1]
+    if not _turno_coerente(ultimo):
+        ultimo = [ultimo[0]]
+
+    turni = [turno for turno in turni[:-1] if _turno_coerente(turno)]
+    turni.append(ultimo)
+
+    turni = [_compatta_turno(turno) for turno in turni]
+
+    def totale_messaggi():
+        return sum(len(turno) for turno in turni)
+
+    def totale_caratteri():
+        return sum(
+            _dimensione_messaggio(messaggio)
+            for turno in turni
+            for messaggio in turno
+        )
+
+    while len(turni) > 1 and totale_messaggi() > max_messaggi:
+        turni.pop(0)
+
+    while len(turni) > 1 and totale_caratteri() > MAX_CARATTERI_CRONOLOGIA:
+        turni.pop(0)
+
+    messaggi[:] = [
+        messaggio_sistema,
+        *(messaggio for turno in turni for messaggio in turno),
+    ]
 
 
 def avvia_chat(
@@ -450,6 +650,7 @@ def avvia_chat(
     max_messaggi: int,
     host_ollama: str,
     timeout_ollama: float,
+    num_ctx: int,
     stato_memoria: StatoMemoria,
     percorso_memoria: Path,
     limite_ricerca: int,
@@ -464,6 +665,24 @@ def avvia_chat(
     ]
 
     stato_sessione = MemorySessionState()
+
+    registro_strumenti = crea_registro_memoria()
+    registra_tool_sistema(registro_strumenti)
+    registra_tool_filesystem(registro_strumenti)
+
+    contesto_strumenti = ContestoMemoria(
+        stato_memoria=stato_memoria,
+        stato_sessione=stato_sessione,
+        percorso_memoria=percorso_memoria,
+        limite_ricerca=limite_ricerca,
+    )
+
+    # Le root filesystem autorizzate vivono in config.json
+    # (tools.filesystem.allowed_roots); avvia_chat non riceve ancora il
+    # config grezzo dal chiamante, quindi lo rilegge qui una volta sola
+    # all'avvio della sessione, in modo self-contained.
+    config_filesystem = carica_config(_BASE_DIR / "config.json")
+    contesto_filesystem = prepara_contesto_filesystem(config_filesystem, _BASE_DIR)
 
     while True:
         try:
@@ -485,6 +704,13 @@ def avvia_chat(
             "content": domanda,
         }
 
+        # Stato pre-turno: se il turno fallisce in qualunque punto
+        # (dispatch, post-tool, secondo giro, interruzione), la
+        # cronologia torna esattamente a questo stato, senza user,
+        # tool call o role=tool orfani. Copia superficiale sufficiente:
+        # limita_cronologia non modifica mai i messaggi in place.
+        messaggi_pre_turno = list(messaggi)
+
         messaggi.append(messaggio_utente)
         limita_cronologia(messaggi, max_messaggi)
 
@@ -492,9 +718,10 @@ def avvia_chat(
             risposta = esegui_turno_con_tools(
                 modello,
                 messaggi,
-                TOOLS_MEMORIA,
+                registro_strumenti.elenco_schema(),
                 host_ollama,
                 timeout_ollama,
+                num_ctx,
             )
 
             tool_calls = risposta.message.tool_calls or []
@@ -502,7 +729,7 @@ def avvia_chat(
             if len(tool_calls) > 1:
                 risposta_completa = (
                     "Posso gestire una sola operazione "
-                    "di memoria per volta. "
+                    "per volta. "
                     "Indicami quale vuoi eseguire per prima."
                 )
 
@@ -565,6 +792,7 @@ def avvia_chat(
                         messaggi=messaggi_memoria,
                         host_ollama=host_ollama,
                         timeout_ollama=timeout_ollama,
+                        num_ctx=num_ctx,
                         risultato_tool=risultato_memoria,
                     )
 
@@ -622,6 +850,7 @@ def avvia_chat(
                             messaggi=messaggi_memoria,
                             host_ollama=host_ollama,
                             timeout_ollama=timeout_ollama,
+                            num_ctx=num_ctx,
                             risultato_tool=risultato_memoria,
                         )
 
@@ -676,19 +905,30 @@ def avvia_chat(
             if isinstance(argomenti, str):
                 argomenti = json.loads(argomenti)
 
+            # Dominio determinato esplicitamente dal registry (nessuna
+            # euristica su prefissi/substring del nome del tool).
+            tool_spec = registro_strumenti.trova(nome_tool)
+            dominio_tool = tool_spec.dominio if tool_spec is not None else None
+
             # Conserviamo il messaggio assistant contenente
             # la tool call nella cronologia.
             messaggi.append(
                 risposta.message
             )
 
-            risultato_tool = esegui_tool_memoria(
-                nome_tool=nome_tool,
-                argomenti=argomenti,
-                stato_memoria=stato_memoria,
-                stato_sessione=stato_sessione,
-                percorso_memoria=percorso_memoria,
-                limite_ricerca=limite_ricerca,
+            # Il registry inoltra un contesto opaco all'handler: per il
+            # dominio filesystem serve quello con le root autorizzate,
+            # non lo stato memoria (che gli handler filesystem non
+            # userebbero comunque).
+            if dominio_tool == "filesystem":
+                contesto_dispatch = contesto_filesystem
+            else:
+                contesto_dispatch = contesto_strumenti
+
+            risultato_tool = registro_strumenti.dispatch(
+                nome_tool,
+                argomenti,
+                contesto_dispatch,
             )
             if (
                 nome_tool == "cerca_memoria"
@@ -724,29 +964,42 @@ def avvia_chat(
             # RISPOSTA FINALE DOPO IL TOOL
             # -------------------------------------------------
 
-            if risultato_tool.get("status") == "blocked_sensitive":
+            if dominio_tool == "memory":
                 # Contenuto potenzialmente sensibile: nessun secondo
                 # giro Ollama, per non fargli mai vedere/ripetere il
                 # valore rilevato. Risposta locale deterministica.
-                risposta_completa = genera_risposta_deterministica_memoria(
-                    risultato_tool
+                salta_secondo_giro = (
+                    risultato_tool.get("status") == "blocked_sensitive"
                 )
+                fallback_deterministico = genera_risposta_deterministica_memoria
+            elif dominio_tool == "system":
+                salta_secondo_giro = False
+                fallback_deterministico = fallback_deterministico_sistema
+            elif dominio_tool == "filesystem":
+                # File classificato sensibile (per nome o per contenuto):
+                # read_file non mette mai il contenuto in risultato_tool
+                # in questo caso, quindi role="tool" e' già sicuro; qui
+                # evitiamo comunque il secondo giro Ollama, per non
+                # fargli mai ragionare o commentare su un blocco di
+                # sicurezza. Risposta locale deterministica.
+                salta_secondo_giro = (
+                    risultato_tool.get("status") == "sensitive_file"
+                )
+                fallback_deterministico = fallback_deterministico_file
             else:
-                try:
-                    risposta_completa = genera_risposta_finale_memoria(
-                        modello=modello,
-                        messaggi=messaggi,
-                        host_ollama=host_ollama,
-                        timeout_ollama=timeout_ollama,
-                        risultato_tool=risultato_tool,
-                    )
+                salta_secondo_giro = False
+                fallback_deterministico = _fallback_minimo_dominio_sconosciuto
 
-                except Exception:
-                    risposta_completa = (
-                        genera_risposta_deterministica_memoria(
-                            risultato_tool
-                        )
-                    )
+            risposta_completa = genera_risposta_post_tool(
+                modello=modello,
+                messaggi=messaggi,
+                host_ollama=host_ollama,
+                timeout_ollama=timeout_ollama,
+                num_ctx=num_ctx,
+                risultato_tool=risultato_tool,
+                salta_secondo_giro=salta_secondo_giro,
+                fallback_deterministico=fallback_deterministico,
+            )
 
             print(
                 f"\nAster: {risposta_completa}"
@@ -769,12 +1022,7 @@ def avvia_chat(
                 "\n\nGenerazione interrotta."
             )
 
-            if (
-                messaggi
-                and messaggi[-1]
-                is messaggio_utente
-            ):
-                messaggi.pop()
+            messaggi[:] = messaggi_pre_turno
 
         except Exception as errore:
             print(
@@ -782,9 +1030,4 @@ def avvia_chat(
                 f"con Ollama: {errore}"
             )
 
-            if (
-                messaggi
-                and messaggi[-1]
-                is messaggio_utente
-            ):
-                messaggi.pop()
+            messaggi[:] = messaggi_pre_turno

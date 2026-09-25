@@ -39,6 +39,7 @@ def main() -> None:
 
         host_ollama = config["ollama"]["host"]
         timeout_ollama = config["ollama"].get("timeout", 60)
+        num_ctx = config["ollama"].get("num_ctx", 8192)
         limite_ricerca = config["memory"]["search_max_results"]
 
         percorso_prompt = BASE_DIR / config["files"]["prompt"]
@@ -77,6 +78,7 @@ def main() -> None:
         max_messaggi,
         host_ollama,
         timeout_ollama,
+        num_ctx,
         stato_memoria,
         percorso_memoria,
         limite_ricerca,
