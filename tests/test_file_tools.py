@@ -39,6 +39,7 @@ from modules.config import carica_config
 from modules.file_tools import (
     MAX_DIRECTORY_ENTRIES,
     MAX_READ_BYTES,
+    TOOLS_FILE,
     ContestoFilesystem,
     _prepara_allowed_roots,
     fallback_deterministico_file,
@@ -669,21 +670,33 @@ class TestReadFileBase(FileToolsTestCase):
 
         self.assertEqual(risultato["status"], "not_a_file")
 
-    def test_esattamente_64kib_consentito(self):
-        (self.root / "esatto.txt").write_bytes(b"a" * MAX_READ_BYTES)
+    def test_limite_e_2kib(self):
+        self.assertEqual(MAX_READ_BYTES, 2048)
+
+    def test_esattamente_2048_byte_consentito(self):
+        (self.root / "esatto.txt").write_bytes(b"a" * 2048)
 
         risultato = read_file({"path": "esatto.txt"}, self.contesto)
 
         self.assertTrue(risultato["ok"])
-        self.assertEqual(len(risultato["data"]["content"]), MAX_READ_BYTES)
+        self.assertEqual(len(risultato["data"]["content"]), 2048)
 
-    def test_oltre_64kib_too_large(self):
-        (self.root / "grande.txt").write_bytes(b"a" * (MAX_READ_BYTES + 1))
+    def test_2049_byte_too_large(self):
+        (self.root / "grande.txt").write_bytes(b"a" * 2049)
 
         risultato = read_file({"path": "grande.txt"}, self.contesto)
 
         self.assertFalse(risultato["ok"])
         self.assertEqual(risultato["status"], "too_large")
+
+    def test_schema_descrive_limite_2kib(self):
+        schema = next(
+            s for s in TOOLS_FILE if s["function"]["name"] == "read_file"
+        )
+        descrizione = schema["function"]["description"]
+
+        self.assertIn("2 KiB", descrizione)
+        self.assertNotIn("64 KiB", descrizione)
 
     def test_too_large_non_contiene_content(self):
         (self.root / "grande.txt").write_bytes(b"a" * (MAX_READ_BYTES + 1))

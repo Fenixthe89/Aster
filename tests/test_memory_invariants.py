@@ -553,5 +553,148 @@ class TestAltriControlliConservativi(MemoriaTestCase):
         self.assertEqual(len(ss.pending_action.candidates), 3, "i candidati originali non devono essere alterati")
 
 
+# =====================================================================
+# 0.6.8 - ERROR PRIVACY: gli OSError non espongono path nel risultato
+# =====================================================================
+
+import modules.memory_tools as memory_tools
+
+PATH_FINTO = "C:\\Users\\Secret\\data\\memory.json"
+ERRORE_ARCHIVIO = "Errore di accesso all'archivio della memoria."
+
+
+def _oserror_finto(*args, **kwargs):
+    raise OSError(PATH_FINTO)
+
+
+class TestErrorePrivacyMemoria(MemoriaTestCase):
+    """OSError -> messaggio fisso; ValueError/RuntimeError applicativi invariati."""
+
+    def _con_patch(self, nome_funzione, sostituto, chiamata):
+        originale = getattr(memory_tools, nome_funzione)
+        setattr(memory_tools, nome_funzione, sostituto)
+        try:
+            return chiamata()
+        finally:
+            setattr(memory_tools, nome_funzione, originale)
+
+    def _assert_nessun_path(self, risultato):
+        serializzato = json.dumps(risultato, ensure_ascii=False)
+        self.assertNotIn("Secret", serializzato)
+        self.assertNotIn("Users", serializzato)
+        self.assertNotIn("memory.json", serializzato)
+        self.assertEqual(risultato["error"], ERRORE_ARCHIVIO)
+
+    def test_search_oserror(self):
+        self._seed_memoria([self._ricordo(1, "Uso Linux")], next_id=2)
+        sm, ss = self._nuovo_stato()
+
+        r = self._con_patch(
+            "cerca_memoria", _oserror_finto,
+            lambda: self._tool("cerca_memoria", {"query": "Linux"}, sm, ss),
+        )
+
+        self.assertEqual(r["status"], "tool_error")
+        self._assert_nessun_path(r)
+
+    def test_create_explicit_oserror(self):
+        self._seed_memoria([], next_id=1)
+        hash_prima = self._hash_memoria()
+        sm, ss = self._nuovo_stato()
+
+        r = self._con_patch(
+            "aggiungi_ricordo", _oserror_finto,
+            lambda: self._tool(
+                "crea_memoria",
+                {"content": "Uso VS Code.", "mode": "explicit"},
+                sm, ss,
+            ),
+        )
+
+        self.assertEqual(r["status"], "tool_error")
+        self._assert_nessun_path(r)
+        self.assertEqual(self._hash_memoria(), hash_prima)
+
+    def test_update_confirm_oserror(self):
+        self._seed_memoria([self._ricordo(1, "Contenuto originale")], next_id=2)
+        sm, ss = self._nuovo_stato()
+
+        r1 = self._tool(
+            "modifica_memoria",
+            {"memory_id": 1, "new_content": "Contenuto aggiornato"},
+            sm, ss,
+        )
+        self.assertEqual(r1["status"], "pending_confirmation")
+
+        r2 = self._con_patch(
+            "aggiorna_ricordo", _oserror_finto,
+            lambda: self._tool("gestisci_pending_memoria", {"decision": "confirm"}, sm, ss),
+        )
+
+        self.assertEqual(r2["status"], "tool_error")
+        self._assert_nessun_path(r2)
+
+    def test_delete_confirm_oserror(self):
+        self._seed_memoria([self._ricordo(1, "Da eliminare")], next_id=2)
+        sm, ss = self._nuovo_stato()
+
+        r1 = self._tool("elimina_memoria", {"memory_id": 1}, sm, ss)
+        self.assertEqual(r1["status"], "pending_confirmation")
+
+        r2 = self._con_patch(
+            "elimina_ricordo", _oserror_finto,
+            lambda: self._tool("gestisci_pending_memoria", {"decision": "confirm"}, sm, ss),
+        )
+
+        self.assertEqual(r2["status"], "tool_error")
+        self._assert_nessun_path(r2)
+
+    def test_value_error_applicativo_invariato(self):
+        self._seed_memoria([], next_id=1)
+        sm, ss = self._nuovo_stato()
+
+        def value_error(*args, **kwargs):
+            raise ValueError("Il contenuto del ricordo non è valido.")
+
+        r = self._con_patch(
+            "aggiungi_ricordo", value_error,
+            lambda: self._tool(
+                "crea_memoria",
+                {"content": "Uso VS Code.", "mode": "explicit"},
+                sm, ss,
+            ),
+        )
+
+        self.assertEqual(r["status"], "tool_error")
+        self.assertEqual(r["error"], "Il contenuto del ricordo non è valido.")
+
+    def test_runtime_error_applicativo_invariato(self):
+        self._seed_memoria([], next_id=1)
+        sm, ss = self._nuovo_stato()
+
+        def runtime_error(*args, **kwargs):
+            raise RuntimeError("Salvataggio bloccato: backup presente.")
+
+        r = self._con_patch(
+            "aggiungi_ricordo", runtime_error,
+            lambda: self._tool(
+                "crea_memoria",
+                {"content": "Uso VS Code.", "mode": "explicit"},
+                sm, ss,
+            ),
+        )
+
+        self.assertEqual(r["error"], "Salvataggio bloccato: backup presente.")
+
+    def test_id_inesistente_messaggio_applicativo_invariato(self):
+        self._seed_memoria([self._ricordo(1, "Uso Linux")], next_id=2)
+        sm, ss = self._nuovo_stato()
+
+        r = self._tool("elimina_memoria", {"memory_id": 99}, sm, ss)
+
+        self.assertEqual(r["status"], "not_found")
+        self.assertEqual(r.get("error"), "Ricordo non trovato.")
+
+
 if __name__ == "__main__":
     unittest.main()

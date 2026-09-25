@@ -584,3 +584,139 @@ Stato
 
 Punto D della memoria persistente completato.
 Versione approvata dopo regressione finale e review indipendente.
+
+---
+
+v0.6.8 - Local Tools & Actions
+
+Obiettivo
+
+Chiudere la serie 0.6: Aster passa da "parlare e ricordare" a
+"osservare il PC" tramite tool locali sicuri, mantenendo in Python
+validazione, policy ed esecuzione. Il modello interpreta l'intento;
+Python decide e agisce. Nessuna shell, nessun subprocess, nessuna
+esecuzione arbitraria.
+
+Generic Tool Registry (0.6.1)
+
+* Introdotto modules/tool_registry.py: ToolSpec (nome, schema,
+  handler, livello, dominio) e RegistroStrumenti.
+* Lookup rigoroso per nome: un tool sconosciuto non esegue mai alcun
+  handler e produce un errore strutturato.
+* Livelli READ_ONLY, CONFIRM_REQUIRED, FORBIDDEN; un tool FORBIDDEN
+  non viene mai eseguito.
+* I 7 tool memoria esistenti registrati tramite adapter, invariati.
+
+Generic Post-Tool Pipeline (0.6.2)
+
+* Introdotto modules/tool_response.py: un solo secondo giro Ollama,
+  nessun retry, fallback deterministico di dominio su errore o quando
+  il secondo giro va saltato.
+* La pipeline non conosce alcun dominio.
+
+Tool di sistema (0.6.3, 0.6.4, 0.6.7)
+
+* get_system_info: sistema operativo, release, architettura, CPU
+  logiche, versione Python, processore. Nessun hostname, username,
+  IP, MAC o seriale.
+* get_disk_usage: spazio del solo filesystem che contiene Aster,
+  senza esporre path, mount o drive.
+* list_processes: processi in esecuzione (solo pid e name), filtro
+  opzionale per nome (sottostringa, senza distinzione maiuscole/
+  minuscole, nessuna regex), massimo 50 voci ordinate, total e
+  truncated. Sola osservazione: nessuna azione sui processi.
+* list_processes usa psutil con import protetto: se psutil manca,
+  Aster parte comunque e il tool restituisce un errore fisso.
+
+Filesystem Safety Foundation (0.6.5)
+
+* Introdotto modules/filesystem_policy.py: default deny, root
+  assolute/esistenti/directory, containment verificato dopo
+  resolve(), symlink verso l'esterno negati, nessun path esterno nei
+  deny.
+* Config tools.filesystem.allowed_roots, vuota di default: zero
+  accesso al filesystem finché l'utente non autorizza una root.
+
+list_directory e read_file (0.6.6a, 0.6.6b)
+
+* list_directory: un solo livello, nessuna ricorsione, massimo 100
+  voci, nessun path nel risultato.
+* read_file: doppia validazione della policy, file intero oppure
+  too_large, rilevamento binario, decodifica utf-8/cp1252 strict,
+  blocco di file sensibili per nome e per contenuto (chiavi private,
+  token noti, segreti assegnati a letterali).
+* Per sensitive_file nessun contenuto entra nel risultato tool e
+  nessun secondo giro Ollama viene effettuato.
+
+Contesto Ollama esplicito (0.6.6b)
+
+* num_ctx configurato esplicitamente a 8192 in config.json e
+  propagato a tutte le chiamate Ollama.
+* Il default runtime 4096 troncava prompt e schemi tool e degradava
+  il routing della memoria: num_ctx è parte della correttezza
+  funzionale del routing, non solo tuning.
+
+Dipendenze (0.6.7)
+
+* Introdotto requirements.txt: ollama>=0.6,<0.7 e psutil>=7.1,<8.
+
+Hardening finale (0.6.8)
+
+* read_file limitato a 2 KiB: su Qwen i dati numerici valgono circa
+  un token per byte, e file più grandi potevano saturare il contesto.
+  Contratto invariato: file intero oppure too_large, nessun
+  troncamento o paginazione.
+* Cronologia protetta: i risultati tool oltre 1000 caratteri dei turni
+  precedenti vengono compattati (solo ok, operation, status e
+  omitted_from_history); nei soli turni con un tool compattato anche
+  la risposta assistant oltre 2000 caratteri viene sostituita da un
+  placeholder.
+* Rete di sicurezza di 6000 caratteri sulla cronologia (non è una
+  garanzia sui token). Tagli sempre per turni interi: nessun
+  messaggio tool, tool call o turno parziale orfano. Il messaggio
+  utente corrente resta sempre.
+* Prompt: se un risultato precedente è omesso dalla cronologia, il
+  modello deve richiamare lo strumento invece di inventare dettagli.
+* Rollback del turno: se il turno fallisce o viene interrotto in
+  qualunque punto, la cronologia torna esattamente allo stato
+  precedente al turno.
+* Error privacy: get_system_info, get_disk_usage e gli errori OSError
+  dei tool memoria restituiscono messaggi fissi, senza path né
+  dettagli del sistema operativo. I messaggi applicativi della
+  memoria restano invariati.
+
+Requisiti e supporto
+
+* Python >= 3.10.
+* Dipendenze da requirements.txt.
+* Ollama locale; baseline testata con qwen3:8b e num_ctx 8192.
+* Avvio supportato: sorgente + venv + requirements.txt + Aster.bat.
+* L'eseguibile PyInstaller NON è supportato in questa release.
+
+Verifica finale
+
+* 12 tool: 7 memoria, 3 sistema, 2 filesystem.
+* 352/352 test automatici superati.
+* Routing reale con qwen3:8b: memoria recall 5/5, memoria create 5/5,
+  sistema e filesystem corretti.
+* Context reale: primo giro 4877 token a cronologia vuota, 6344 con
+  cronologia piena, massimo 6157 dopo un risultato tool pesante.
+* Installazione da zero in un venv pulito verificata.
+* Dati reali in data/ invariati.
+
+Limiti noti
+
+* read_file legge al massimo 2 KiB.
+* Rischio TOCTOU residuo sul filesystem (doppia validazione, nessun
+  open-by-handle).
+* I guard per contenuti sensibili sono ad alta precisione ma non
+  esaustivi.
+* Un messaggio utente arbitrariamente enorme non è completamente
+  governato dal budget della cronologia.
+* Il budget della cronologia è in caratteri, non in token.
+* Distribuzione PyInstaller rimandata a una versione futura.
+
+Stato
+
+Serie 0.6 completata. Release candidate in attesa di approvazione
+finale, merge su main e tag.

@@ -258,6 +258,8 @@ Se il tool restituisce status="access_denied", non tentare automaticamente un pa
 
 Se read_file restituisce status="sensitive_file", il file è stato bloccato perché potrebbe contenere dati sensibili: non tentare percorsi alternativi, non provare a leggere una presunta copia dello stesso file, non cercare in alcun modo di aggirare il blocco. Informa semplicemente l'utente che quel file non può essere letto per questo motivo.
 
+Se un risultato di uno strumento di un turno precedente risulta omesso dalla cronologia (omitted_from_history), non inventarne i dettagli: se servono di nuovo, richiama lo strumento appropriato.
+
 
 # STILE E COMPORTAMENTO
 

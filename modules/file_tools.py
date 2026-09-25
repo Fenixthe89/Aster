@@ -9,7 +9,7 @@ from modules.filesystem_policy import risolvi_path_autorizzato
 from modules.tool_registry import RegistroStrumenti, ToolSpec
 
 MAX_DIRECTORY_ENTRIES = 100
-MAX_READ_BYTES = 64 * 1024
+MAX_READ_BYTES = 2 * 1024
 
 TOOLS_FILE = [
     {
@@ -43,7 +43,7 @@ TOOLS_FILE = [
             "name": "read_file",
             "description": (
                 "Legge il contenuto testuale di un singolo file dentro una "
-                "posizione autorizzata, fino a 64 KiB. Rifiuta file binari, "
+                "posizione autorizzata, fino a 2 KiB. Rifiuta file binari, "
                 "troppo grandi o riconosciuti come potenzialmente sensibili "
                 "(per nome o per contenuto)."
             ),

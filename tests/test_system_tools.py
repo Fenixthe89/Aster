@@ -559,7 +559,57 @@ class TestHandlerGetDiskUsage(unittest.TestCase):
         self.assertFalse(risultato["ok"])
         self.assertEqual(risultato["operation"], "get_disk_usage")
         self.assertEqual(risultato["status"], "tool_error")
-        self.assertIn("disco non raggiungibile", risultato["error"])
+        # 0.6.8: messaggio fisso, mai il testo dell'eccezione.
+        self.assertEqual(
+            risultato["error"],
+            "Non sono riuscito a leggere lo spazio disco.",
+        )
+        self.assertNotIn("disco non raggiungibile", risultato["error"])
+
+    def test_oserror_con_path_non_compare(self):
+        def disk_usage_fallisce(percorso):
+            raise OSError(2, "Accesso negato", r"C:\Users\Secret\Aster\modules")
+
+        originale = system_tools.shutil.disk_usage
+        system_tools.shutil.disk_usage = disk_usage_fallisce
+        try:
+            risultato = get_disk_usage({}, None)
+        finally:
+            system_tools.shutil.disk_usage = originale
+
+        serializzato = str(risultato)
+        self.assertNotIn("Secret", serializzato)
+        self.assertNotIn("Users", serializzato)
+        self.assertNotIn("Accesso negato", serializzato)
+        self.assertEqual(
+            risultato["error"],
+            "Non sono riuscito a leggere lo spazio disco.",
+        )
+
+
+class TestErrorePrivacyGetSystemInfo(unittest.TestCase):
+
+    def test_eccezione_con_path_non_compare(self):
+        def system_fallisce():
+            raise OSError(13, "Permesso negato", r"C:\Users\Secret\registry")
+
+        originale = system_tools.platform.system
+        system_tools.platform.system = system_fallisce
+        try:
+            risultato = get_system_info({}, None)
+        finally:
+            system_tools.platform.system = originale
+
+        self.assertFalse(risultato["ok"])
+        self.assertEqual(risultato["operation"], "get_system_info")
+        self.assertEqual(risultato["status"], "tool_error")
+        self.assertEqual(
+            risultato["error"],
+            "Non sono riuscito a leggere le informazioni di sistema.",
+        )
+        serializzato = str(risultato)
+        self.assertNotIn("Secret", serializzato)
+        self.assertNotIn("Permesso negato", serializzato)
 
 
 # =====================================================================

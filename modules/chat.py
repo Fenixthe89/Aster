@@ -407,22 +407,241 @@ def _fallback_minimo_dominio_sconosciuto(risultato_tool: dict) -> str:
 
     return "Non riesco a gestire questa richiesta."
 
+# ---------------------------------------------------------------------
+# Budget della cronologia (0.6.8)
+# ---------------------------------------------------------------------
+# Rete di sicurezza pratica, NON una garanzia token-safe: i caratteri
+# non sono token (es. le cifre valgono circa un token ciascuna).
+SOGLIA_COMPATTAZIONE_TOOL = 1000
+SOGLIA_COMPATTAZIONE_RISPOSTA = 2000
+MAX_CARATTERI_CRONOLOGIA = 6000
+
+# Placeholder fisso per un risultato tool non JSON: nessun dato originale.
+PLACEHOLDER_TOOL_OMESSO = '{"omitted_from_history": true}'
+PLACEHOLDER_RISPOSTA_OMESSA = (
+    "[Risposta precedente basata su un risultato tool voluminoso. "
+    "Richiamare lo strumento se servono di nuovo i dettagli.]"
+)
+
+_CAMPI_TOOL_CONSERVATI = ("ok", "operation", "status")
+
+
+def _campo(messaggio, nome: str):
+    """Legge un campo sia da un dict sia da un messaggio ollama (oggetto)."""
+
+    if isinstance(messaggio, dict):
+        return messaggio.get(nome)
+    return getattr(messaggio, nome, None)
+
+
+def _ha_tool_calls(messaggio) -> bool:
+    return _campo(messaggio, "role") == "assistant" and bool(
+        _campo(messaggio, "tool_calls")
+    )
+
+
+def _dimensione_messaggio(messaggio) -> int:
+    """Caratteri di un messaggio: contenuto più nome/argomenti delle tool call."""
+
+    dimensione = len(_campo(messaggio, "content") or "")
+
+    for chiamata in _campo(messaggio, "tool_calls") or []:
+        funzione = _campo(chiamata, "function")
+        dimensione += len(str(_campo(funzione, "name") or ""))
+        dimensione += len(str(_campo(funzione, "arguments") or ""))
+
+    return dimensione
+
+
+def _tool_gia_compattato(contenuto: str) -> bool:
+    try:
+        dati = json.loads(contenuto)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(dati, dict) and dati.get("omitted_from_history") is True
+
+
+def _compatta_contenuto_tool(contenuto: str) -> str:
+    """
+    Rappresentazione minima di un risultato tool voluminoso.
+
+    Conserva solo ok/operation/status (se presenti) più il marcatore
+    omitted_from_history: mai data, content, processes, entries, path
+    o testo di errore.
+    """
+
+    try:
+        dati = json.loads(contenuto)
+    except (TypeError, ValueError):
+        return PLACEHOLDER_TOOL_OMESSO
+
+    if not isinstance(dati, dict):
+        return PLACEHOLDER_TOOL_OMESSO
+
+    minimo = {
+        campo: dati[campo]
+        for campo in _CAMPI_TOOL_CONSERVATI
+        if campo in dati and isinstance(dati[campo], (bool, str))
+    }
+    minimo["omitted_from_history"] = True
+
+    return json.dumps(minimo, ensure_ascii=False)
+
+
+def _con_contenuto(messaggio: dict, contenuto: str) -> dict:
+    """Copia del messaggio con nuovo contenuto (mai mutazione in place)."""
+
+    nuovo = dict(messaggio)
+    nuovo["content"] = contenuto
+    return nuovo
+
+
+def _dividi_in_turni(conversazione: list) -> list[list]:
+    """
+    Divide la conversazione in blocchi-turno, ognuno aperto da un
+    messaggio user. I messaggi prima del primo user (pezzi di un
+    turno già tagliato) vengono scartati.
+    """
+
+    turni = []
+
+    for messaggio in conversazione:
+        if _campo(messaggio, "role") == "user":
+            turni.append([messaggio])
+        elif turni:
+            turni[-1].append(messaggio)
+
+    return turni
+
+
+def _turno_coerente(turno: list) -> bool:
+    """
+    Un turno è coerente se: inizia con user; ogni role=tool segue una
+    tool call assistant (o un altro tool); ogni tool call assistant è
+    seguita da almeno un role=tool; non contiene altri ruoli.
+    """
+
+    if not turno or _campo(turno[0], "role") != "user":
+        return False
+
+    for indice in range(1, len(turno)):
+        messaggio = turno[indice]
+        ruolo = _campo(messaggio, "role")
+        precedente = turno[indice - 1]
+
+        if ruolo == "tool":
+            if not (
+                _ha_tool_calls(precedente)
+                or _campo(precedente, "role") == "tool"
+            ):
+                return False
+        elif ruolo == "assistant":
+            if _ha_tool_calls(messaggio):
+                successivo = turno[indice + 1] if indice + 1 < len(turno) else None
+                if successivo is None or _campo(successivo, "role") != "tool":
+                    return False
+        else:
+            return False
+
+    return True
+
+
+def _compatta_turno(turno: list) -> list:
+    """
+    Compatta i role=tool voluminosi e, nei soli turni con un tool
+    compattato, anche la risposta finale assistant troppo lunga (che
+    potrebbe ripetere il contenuto del tool, es. read_file).
+    """
+
+    risultato = []
+    turno_pesante = False
+
+    for messaggio in turno:
+        if (
+            isinstance(messaggio, dict)
+            and messaggio.get("role") == "tool"
+            and isinstance(messaggio.get("content"), str)
+        ):
+            contenuto = messaggio["content"]
+            if _tool_gia_compattato(contenuto):
+                turno_pesante = True
+            elif len(contenuto) > SOGLIA_COMPATTAZIONE_TOOL:
+                messaggio = _con_contenuto(
+                    messaggio,
+                    _compatta_contenuto_tool(contenuto),
+                )
+                turno_pesante = True
+
+        risultato.append(messaggio)
+
+    if not turno_pesante:
+        return risultato
+
+    for indice, messaggio in enumerate(risultato):
+        if (
+            isinstance(messaggio, dict)
+            and messaggio.get("role") == "assistant"
+            and not messaggio.get("tool_calls")
+            and len(messaggio.get("content") or "") > SOGLIA_COMPATTAZIONE_RISPOSTA
+        ):
+            risultato[indice] = _con_contenuto(
+                messaggio,
+                PLACEHOLDER_RISPOSTA_OMESSA,
+            )
+
+    return risultato
+
+
 def limita_cronologia(
-    messaggi: list[dict[str, str]],
+    messaggi: list,
     max_messaggi: int,
 ) -> None:
     """
-    Mantiene sempre il messaggio di sistema e soltanto
-    gli ultimi messaggi della conversazione.
+    Mantiene sempre il messaggio di sistema e una cronologia limitata.
+
+    Ordine: divisione in turni interi (scarta pezzi iniziali orfani e
+    turni incoerenti) -> compattazione dei risultati tool voluminosi ->
+    limite per numero di messaggi -> limite per caratteri. I tagli
+    avvengono sempre per turni interi, mai a metà turno. L'ultimo
+    turno (che contiene il messaggio user corrente) resta sempre.
     """
 
     messaggio_sistema = messaggi[0]
-    conversazione = messaggi[1:]
+    turni = _dividi_in_turni(messaggi[1:])
 
-    if len(conversazione) > max_messaggi:
-        conversazione = conversazione[-max_messaggi:]
+    if not turni:
+        messaggi[:] = [messaggio_sistema]
+        return
 
-    messaggi[:] = [messaggio_sistema, *conversazione]
+    ultimo = turni[-1]
+    if not _turno_coerente(ultimo):
+        ultimo = [ultimo[0]]
+
+    turni = [turno for turno in turni[:-1] if _turno_coerente(turno)]
+    turni.append(ultimo)
+
+    turni = [_compatta_turno(turno) for turno in turni]
+
+    def totale_messaggi():
+        return sum(len(turno) for turno in turni)
+
+    def totale_caratteri():
+        return sum(
+            _dimensione_messaggio(messaggio)
+            for turno in turni
+            for messaggio in turno
+        )
+
+    while len(turni) > 1 and totale_messaggi() > max_messaggi:
+        turni.pop(0)
+
+    while len(turni) > 1 and totale_caratteri() > MAX_CARATTERI_CRONOLOGIA:
+        turni.pop(0)
+
+    messaggi[:] = [
+        messaggio_sistema,
+        *(messaggio for turno in turni for messaggio in turno),
+    ]
 
 
 def avvia_chat(
@@ -484,6 +703,13 @@ def avvia_chat(
             "role": "user",
             "content": domanda,
         }
+
+        # Stato pre-turno: se il turno fallisce in qualunque punto
+        # (dispatch, post-tool, secondo giro, interruzione), la
+        # cronologia torna esattamente a questo stato, senza user,
+        # tool call o role=tool orfani. Copia superficiale sufficiente:
+        # limita_cronologia non modifica mai i messaggi in place.
+        messaggi_pre_turno = list(messaggi)
 
         messaggi.append(messaggio_utente)
         limita_cronologia(messaggi, max_messaggi)
@@ -796,12 +1022,7 @@ def avvia_chat(
                 "\n\nGenerazione interrotta."
             )
 
-            if (
-                messaggi
-                and messaggi[-1]
-                is messaggio_utente
-            ):
-                messaggi.pop()
+            messaggi[:] = messaggi_pre_turno
 
         except Exception as errore:
             print(
@@ -809,9 +1030,4 @@ def avvia_chat(
                 f"con Ollama: {errore}"
             )
 
-            if (
-                messaggi
-                and messaggi[-1]
-                is messaggio_utente
-            ):
-                messaggi.pop()
+            messaggi[:] = messaggi_pre_turno

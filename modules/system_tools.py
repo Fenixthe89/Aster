@@ -113,12 +113,14 @@ def get_system_info(argomenti: dict, contesto) -> dict:
             "cpu_count": os.cpu_count(),
             "processor": platform.processor(),
         }
-    except Exception as errore:
+    except Exception:
+        # Messaggio fisso: il testo dell'eccezione potrebbe contenere
+        # path o dettagli OS e non deve mai arrivare in role="tool".
         return {
             "ok": False,
             "operation": "get_system_info",
             "status": "tool_error",
-            "error": str(errore),
+            "error": "Non sono riuscito a leggere le informazioni di sistema.",
         }
 
     return {
@@ -147,12 +149,13 @@ def get_disk_usage(argomenti: dict, contesto) -> dict:
     try:
         percorso_aster = Path(__file__).resolve().parent
         uso = shutil.disk_usage(percorso_aster)
-    except Exception as errore:
+    except Exception:
+        # Messaggio fisso: un OSError includerebbe il path reale di Aster.
         return {
             "ok": False,
             "operation": "get_disk_usage",
             "status": "tool_error",
-            "error": str(errore),
+            "error": "Non sono riuscito a leggere lo spazio disco.",
         }
 
     return {
