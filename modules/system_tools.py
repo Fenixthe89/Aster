@@ -3,9 +3,28 @@
 import os
 import platform
 import shutil
+import unicodedata
 from pathlib import Path
 
 from modules.tool_registry import RegistroStrumenti, ToolSpec
+
+# Import protetto: se psutil manca, Aster parte comunque e solo
+# list_processes risponde con un tool_error fisso.
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+# Limite di processi restituiti da list_processes: il risultato entra
+# in role="tool" e resta in cronologia, quindi va tenuto contenuto.
+MAX_PROCESS_ENTRIES = 50
+
+_MAX_LUNGHEZZA_FILTRO = 64
+_MAX_LUNGHEZZA_NOME_PROCESSO = 255
+
+_ERRORE_PSUTIL_ASSENTE = "Elenco processi non disponibile su questa installazione."
+_ERRORE_ENUMERAZIONE = "Non sono riuscito a leggere l'elenco dei processi."
+_ERRORE_FILTRO_NON_VALIDO = "Filtro nome non valido."
 
 TOOLS_SISTEMA = [
     {
@@ -39,6 +58,34 @@ TOOLS_SISTEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_processes",
+            "description": (
+                "Elenca i processi attualmente in esecuzione sul computer "
+                "locale (solo nome e PID). Sola osservazione: non avvia, "
+                "chiude né modifica processi. Un processo non corrisponde "
+                "necessariamente a una finestra visibile."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Opzionale: breve nome o frammento del nome del "
+                            "programma da cercare (es. steam, discord, "
+                            "ollama). Confronto senza distinzione "
+                            "maiuscole/minuscole. Ometti per l'elenco "
+                            "generale."
+                        ),
+                    },
+                },
                 "required": [],
             },
         },
@@ -121,6 +168,147 @@ def get_disk_usage(argomenti: dict, contesto) -> dict:
     }
 
 
+def _contiene_caratteri_controllo(testo: str) -> bool:
+    """True se il testo contiene caratteri Unicode di categoria Cc."""
+
+    return any(unicodedata.category(ch) == "Cc" for ch in testo)
+
+
+def _errore_list_processes(messaggio: str) -> dict:
+    """tool_error di list_processes con messaggio fisso (mai testo di eccezioni)."""
+
+    return {
+        "ok": False,
+        "operation": "list_processes",
+        "status": "tool_error",
+        "error": messaggio,
+    }
+
+
+def _normalizza_filtro_nome(valore) -> tuple[bool, str | None]:
+    """
+    Valida il parametro opzionale name di list_processes.
+
+    Restituisce (valido, filtro). None, "" o soli spazi significano
+    nessun filtro (filtro=None). Tipo non stringa, caratteri di
+    controllo o lunghezza oltre _MAX_LUNGHEZZA_FILTRO dopo strip()
+    rendono il filtro non valido. Il filtro e' solo testo per un
+    confronto Python per sottostringa: nessuna regex, wildcard o shell.
+    """
+
+    if valore is None:
+        return True, None
+
+    if not isinstance(valore, str):
+        return False, None
+
+    if _contiene_caratteri_controllo(valore):
+        return False, None
+
+    filtro = valore.strip()
+
+    if not filtro:
+        return True, None
+
+    if len(filtro) > _MAX_LUNGHEZZA_FILTRO:
+        return False, None
+
+    return True, filtro
+
+
+def _entry_processo_valida(info) -> dict | None:
+    """Restituisce {"pid", "name"} se l'info del processo è valida, altrimenti None."""
+
+    if not isinstance(info, dict):
+        return None
+
+    pid = info.get("pid")
+    nome = info.get("name")
+
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+
+    if not isinstance(nome, str) or not nome.strip():
+        return None
+
+    if len(nome) > _MAX_LUNGHEZZA_NOME_PROCESSO:
+        return None
+
+    if _contiene_caratteri_controllo(nome):
+        return None
+
+    return {"pid": pid, "name": nome}
+
+
+def list_processes(argomenti: dict, contesto) -> dict:
+    """
+    Handler del tool list_processes.
+
+    Sola osservazione: enumera i processi con psutil.process_iter
+    leggendo esclusivamente pid e name (nessun username, cmdline, exe,
+    cwd, environment o altro attributo). Un processo che scompare o
+    non è accessibile durante l'enumerazione viene saltato senza far
+    fallire il tool; solo un errore dell'enumerazione globale produce
+    tool_error, sempre con messaggio fisso (mai il testo
+    dell'eccezione, che potrebbe contenere path o dettagli OS).
+    Ordina per (name.casefold(), pid) PRIMA di troncare a
+    MAX_PROCESS_ENTRIES; total conta tutti i processi validi che
+    corrispondono al filtro. Nessuna deduplicazione per nome.
+    """
+
+    argomenti = argomenti if isinstance(argomenti, dict) else {}
+
+    valido, filtro = _normalizza_filtro_nome(argomenti.get("name"))
+    if not valido:
+        return _errore_list_processes(_ERRORE_FILTRO_NON_VALIDO)
+
+    if psutil is None:
+        return _errore_list_processes(_ERRORE_PSUTIL_ASSENTE)
+
+    filtro_casefold = filtro.casefold() if filtro is not None else None
+    processi = []
+
+    try:
+        for processo in psutil.process_iter(["pid", "name"]):
+            try:
+                info = processo.info
+            except (
+                psutil.NoSuchProcess,
+                psutil.AccessDenied,
+                psutil.ZombieProcess,
+            ):
+                continue
+
+            entry = _entry_processo_valida(info)
+            if entry is None:
+                continue
+
+            if (
+                filtro_casefold is not None
+                and filtro_casefold not in entry["name"].casefold()
+            ):
+                continue
+
+            processi.append(entry)
+    except Exception:
+        return _errore_list_processes(_ERRORE_ENUMERAZIONE)
+
+    processi.sort(key=lambda entry: (entry["name"].casefold(), entry["pid"]))
+    totale = len(processi)
+
+    return {
+        "ok": True,
+        "operation": "list_processes",
+        "status": "success",
+        "data": {
+            "processes": processi[:MAX_PROCESS_ENTRIES],
+            "name_filter": filtro,
+            "total": totale,
+            "truncated": totale > MAX_PROCESS_ENTRIES,
+        },
+    }
+
+
 def _fallback_get_system_info(risultato_tool: dict) -> str:
     """Fallback deterministico dedicato a get_system_info (comportamento invariato)."""
 
@@ -187,6 +375,52 @@ def _fallback_get_disk_usage(risultato_tool: dict) -> str:
     )
 
 
+def _fallback_list_processes(risultato_tool: dict) -> str:
+    """Fallback deterministico dedicato a list_processes."""
+
+    if risultato_tool.get("status") != "success":
+        return (
+            risultato_tool.get("error")
+            or "Non sono riuscito a leggere l'elenco dei processi."
+        )
+
+    data = risultato_tool.get("data", {})
+    processi = data.get("processes") or []
+    filtro = data.get("name_filter")
+    totale = data.get("total", len(processi))
+
+    if not processi:
+        if filtro:
+            return (
+                f'Nessun processo corrispondente al filtro "{filtro}" '
+                "risulta visibile."
+            )
+        return "Nessun processo attivo risulta visibile."
+
+    if filtro:
+        intestazione = (
+            f'Processi attivi corrispondenti al filtro "{filtro}": {totale}'
+        )
+    else:
+        intestazione = (
+            f"Processi attivi osservabili: {totale} "
+            "(non tutti corrispondono a finestre o app visibili)"
+        )
+
+    righe = [intestazione]
+    righe.extend(
+        f"- {processo.get('name')} (PID {processo.get('pid')})"
+        for processo in processi
+    )
+
+    if data.get("truncated"):
+        righe.append(
+            f"Elenco parziale: mostrati {len(processi)} processi su {totale}."
+        )
+
+    return "\n".join(righe)
+
+
 def fallback_deterministico_sistema(risultato_tool: dict) -> str:
     """
     Router del fallback deterministico per il dominio "system".
@@ -203,6 +437,9 @@ def fallback_deterministico_sistema(risultato_tool: dict) -> str:
 
     if operation == "get_disk_usage":
         return _fallback_get_disk_usage(risultato_tool)
+
+    if operation == "list_processes":
+        return _fallback_list_processes(risultato_tool)
 
     if risultato_tool.get("status") != "success":
         return (
@@ -231,6 +468,16 @@ def registra_tool_sistema(registro: RegistroStrumenti) -> None:
             nome="get_disk_usage",
             schema=TOOLS_SISTEMA[1],
             handler=get_disk_usage,
+            livello="READ_ONLY",
+            dominio="system",
+        )
+    )
+
+    registro.registra(
+        ToolSpec(
+            nome="list_processes",
+            schema=TOOLS_SISTEMA[2],
+            handler=list_processes,
             livello="READ_ONLY",
             dominio="system",
         )

@@ -190,9 +190,9 @@ class TestRegistroFilesystem(unittest.TestCase):
             tool_spec = self.registro.trova(nome)
             self.assertEqual(tool_spec.livello, "READ_ONLY", msg=nome)
 
-    def test_totale_undici_tool(self):
+    def test_totale_dodici_tool(self):
         nomi = {s["function"]["name"] for s in self.registro.elenco_schema()}
-        self.assertEqual(len(nomi), 11)
+        self.assertEqual(len(nomi), 12)
         self.assertIn("list_directory", nomi)
         self.assertIn("read_file", nomi)
 
