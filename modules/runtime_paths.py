@@ -55,7 +55,19 @@ class PercorsiRuntime:
     data_root: PurePath
 
     @property
-    def config_file(self) -> PurePath:
+    def default_config_file(self) -> PurePath:
+        # Default app-owned: distribuito con Aster, in sola lettura.
+        return self.resource_root / "config.default.json"
+
+    @property
+    def user_config_file(self) -> PurePath:
+        # Override utente opzionale: vive con i dati persistenti.
+        return self.data_root / "config.json"
+
+    @property
+    def legacy_config_file(self) -> PurePath:
+        # Posizione del config.json fino alla v0.7.1a: se presente e
+        # distinto dal config utente, l'avvio viene bloccato.
         return self.app_root / "config.json"
 
     @property

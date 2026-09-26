@@ -9,6 +9,9 @@ tagli sempre per turni interi (nessun messaggio orfano).
 Verifica il rollback del turno in avvia_chat: su eccezione o
 interruzione la cronologia torna esattamente allo stato pre-turno.
 
+0.7.1b: avvia_chat riceve il ContestoFilesystem già preparato da
+aster.py e non legge configurazione né percorsi runtime.
+
 Nessuna chiamata a Ollama (tutte sostituite da doppi di test).
 Nessun file in data/ viene letto o scritto.
 
@@ -16,6 +19,8 @@ Esecuzione:
     python -m unittest discover -s tests -v
 """
 
+import ast
+import builtins
 import contextlib
 import io
 import json
@@ -25,12 +30,16 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 import modules.chat as chat
+import modules.config as modulo_config
+import modules.file_tools as file_tools
+import modules.runtime_paths as runtime_paths
 import modules.tool_response as tool_response
 from modules.chat import (
     MAX_CARATTERI_CRONOLOGIA,
@@ -40,6 +49,7 @@ from modules.chat import (
     SOGLIA_COMPATTAZIONE_TOOL,
     limita_cronologia,
 )
+from modules.file_tools import ContestoFilesystem
 from modules.memory import MODALITA_NORMALE, StatoMemoria
 from modules.tool_registry import RegistroStrumenti, ToolSpec
 
@@ -476,8 +486,6 @@ class TestRollbackTurno(unittest.TestCase):
         self._patch(chat, "crea_registro_memoria", _registro_di_test)
         self._patch(chat, "registra_tool_sistema", lambda registro: None)
         self._patch(chat, "registra_tool_filesystem", lambda registro: None)
-        self._patch(chat, "carica_config", lambda percorso: {})
-        self._patch(chat, "prepara_contesto_filesystem", lambda config, base: None)
 
     def tearDown(self):
         for (modulo, nome), valore in self._originali.items():
@@ -512,6 +520,7 @@ class TestRollbackTurno(unittest.TestCase):
                     "http://localhost:11434", 60, 8192,
                     StatoMemoria(modalita=MODALITA_NORMALE, memoria=None),
                     self.tmp / "memory.json", 5,
+                    ContestoFilesystem(allowed_roots=[]),
                 )
         finally:
             builtins.input = input_originale
@@ -604,6 +613,110 @@ class TestRollbackTurno(unittest.TestCase):
             messaggi,
             [*self._stato_dopo_primo_turno(), _user("ancora ciao"), _assistant("Eccomi.")],
         )
+
+
+# =====================================================================
+# 0.7.1b: nessuna lettura di configurazione in chat.py
+# =====================================================================
+
+SORGENTE_CHAT = BASE_DIR / "modules" / "chat.py"
+
+
+class TestAvviaChatSenzaConfig(unittest.TestCase):
+
+    def test_nessun_import_di_config_o_runtime_paths(self):
+        albero = ast.parse(SORGENTE_CHAT.read_text(encoding="utf-8"))
+        moduli = set()
+        nomi = set()
+        for nodo in ast.walk(albero):
+            if isinstance(nodo, ast.Import):
+                moduli.update(alias.name for alias in nodo.names)
+            elif isinstance(nodo, ast.ImportFrom):
+                moduli.add(nodo.module or "")
+                nomi.update(alias.name for alias in nodo.names)
+
+        self.assertNotIn("modules.config", moduli)
+        self.assertNotIn("modules.runtime_paths", moduli)
+        for nome in ("config", "runtime_paths", "carica_config",
+                     "carica_config_runtime", "prepara_contesto_filesystem",
+                     "percorsi_runtime"):
+            with self.subTest(nome=nome):
+                self.assertNotIn(nome, nomi)
+                self.assertFalse(hasattr(chat, nome))
+
+    def test_nessuna_apertura_di_file_di_configurazione(self):
+        sorgente = SORGENTE_CHAT.read_text(encoding="utf-8")
+        self.assertNotIn("config.json", sorgente)
+        self.assertNotIn("config.default.json", sorgente)
+
+        for nodo in ast.walk(ast.parse(sorgente)):
+            if not isinstance(nodo, ast.Call):
+                continue
+            funzione = nodo.func
+            nome = getattr(funzione, "id", None) or getattr(funzione, "attr", None)
+            with self.subTest(riga=nodo.lineno):
+                self.assertNotIn(nome, {"open", "read_text", "read_bytes"})
+
+    def test_avvia_chat_usa_il_contesto_ricevuto(self):
+        tmp = Path(tempfile.mkdtemp(prefix="aster_test_contesto_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+
+        contesto_ricevuto = ContestoFilesystem(allowed_roots=[tmp / "root"])
+        contesti_visti = []
+
+        def handler_filesystem(argomenti, contesto):
+            contesti_visti.append(contesto)
+            return {"ok": True, "operation": "tool_fs", "status": "success"}
+
+        def registro_filesystem():
+            registro = RegistroStrumenti()
+            registro.registra(ToolSpec(nome="tool_fs", schema=_schema("tool_fs"),
+                                       handler=handler_filesystem, livello="READ_ONLY",
+                                       dominio="filesystem"))
+            return registro
+
+        def vietato(*args, **kwargs):
+            raise AssertionError("avvia_chat non deve leggere la configurazione")
+
+        aperti = []
+        open_originale = builtins.open
+
+        def open_spia(file, *args, **kwargs):
+            aperti.append(file)
+            return open_originale(file, *args, **kwargs)
+
+        risposte = iter([_risposta_tool("tool_fs")])
+        ingressi = iter(["usa il tool", "esci"])
+
+        patch_attive = [
+            mock.patch.object(chat, "crea_registro_memoria", registro_filesystem),
+            mock.patch.object(chat, "registra_tool_sistema", lambda registro: None),
+            mock.patch.object(chat, "registra_tool_filesystem", lambda registro: None),
+            mock.patch.object(chat, "esegui_turno_con_tools", lambda *a: next(risposte)),
+            mock.patch.object(chat, "genera_risposta_post_tool", lambda **kw: "Fatto."),
+            mock.patch.object(modulo_config, "carica_config", vietato),
+            mock.patch.object(modulo_config, "carica_config_runtime", vietato),
+            mock.patch.object(modulo_config, "_leggi_json", vietato),
+            mock.patch.object(runtime_paths, "percorsi_runtime", vietato),
+            mock.patch.object(file_tools, "prepara_contesto_filesystem", vietato),
+            mock.patch.object(builtins, "input", lambda prompt="": next(ingressi)),
+            mock.patch.object(builtins, "open", open_spia),
+        ]
+        with contextlib.ExitStack() as pila:
+            for patch in patch_attive:
+                pila.enter_context(patch)
+            pila.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            chat.avvia_chat(
+                "prompt di sistema", "qwen3:8b", LIMITE,
+                "http://localhost:11434", 60, 8192,
+                StatoMemoria(modalita=MODALITA_NORMALE, memoria=None),
+                tmp / "memory.json", 5,
+                contesto_ricevuto,
+            )
+
+        self.assertEqual(len(contesti_visti), 1)
+        self.assertIs(contesti_visti[0], contesto_ricevuto)
+        self.assertEqual(aperti, [])
 
 
 if __name__ == "__main__":

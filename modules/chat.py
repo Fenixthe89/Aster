@@ -3,10 +3,9 @@ import json
 import re
 from pathlib import Path
 
-from modules.config import carica_config
 from modules.file_tools import (
+    ContestoFilesystem,
     fallback_deterministico_file,
-    prepara_contesto_filesystem,
     registra_tool_filesystem,
 )
 from modules.memory import StatoMemoria
@@ -20,7 +19,6 @@ from modules.ollama_manager import (
     esegui_risposta_finale,
     esegui_turno_con_tools,
 )
-from modules.runtime_paths import percorsi_runtime
 from modules.system_tools import (
     fallback_deterministico_sistema,
     registra_tool_sistema,
@@ -650,8 +648,15 @@ def avvia_chat(
     stato_memoria: StatoMemoria,
     percorso_memoria: Path,
     limite_ricerca: int,
+    contesto_filesystem: ContestoFilesystem,
 ) -> None:
-    """Avvia la conversazione interattiva con Aster."""
+    """
+    Avvia la conversazione interattiva con Aster.
+
+    contesto_filesystem arriva già preparato dal chiamante (root
+    autorizzate risolte rispetto ad app_root): avvia_chat non legge la
+    configurazione e non conosce i percorsi runtime.
+    """
 
     messaggi = [
         {
@@ -671,19 +676,6 @@ def avvia_chat(
         stato_sessione=stato_sessione,
         percorso_memoria=percorso_memoria,
         limite_ricerca=limite_ricerca,
-    )
-
-    # Le root filesystem autorizzate vivono in config.json
-    # (tools.filesystem.allowed_roots); avvia_chat non riceve ancora il
-    # config grezzo dal chiamante, quindi lo rilegge qui una volta sola
-    # all'avvio della sessione, in modo self-contained. Le root relative
-    # (es. "./workspace") si risolvono rispetto ad app_root, mai rispetto
-    # a cwd, data_root o resource_root.
-    percorsi = percorsi_runtime()
-    config_filesystem = carica_config(percorsi.config_file)
-    contesto_filesystem = prepara_contesto_filesystem(
-        config_filesystem,
-        percorsi.app_root,
     )
 
     while True:

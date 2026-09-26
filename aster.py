@@ -1,6 +1,6 @@
 import json
 
-from modules.config import carica_config
+from modules.config import ErroreConfig, carica_config_runtime
 
 from modules.prompt import carica_prompt
 
@@ -9,6 +9,8 @@ from modules.ollama_manager import controlla_ollama
 from modules.ui import stampa_banner
 
 from modules.chat import avvia_chat
+
+from modules.file_tools import prepara_contesto_filesystem
 
 from modules.memory import inizializza_memoria
 
@@ -23,10 +25,16 @@ def main() -> None:
 
     try:
         # Percorsi di config, prompt e memoria: gestiti centralmente da
-        # runtime_paths (da sorgente identici alla v0.6.8).
+        # runtime_paths (da sorgente prompt e memoria identici alla v0.6.8).
         percorsi = percorsi_runtime()
 
-        config = carica_config(percorsi.config_file)
+        # Unica lettura della configurazione: default app-owned più
+        # eventuale override utente, validati e uniti per whitelist.
+        config = carica_config_runtime(
+            percorsi.default_config_file,
+            percorsi.user_config_file,
+            percorsi.legacy_config_file,
+        )
 
         nome_assistente = config["assistant"]["name"]
         versione = config["assistant"]["version"]
@@ -35,9 +43,17 @@ def main() -> None:
         max_messaggi = config["chat"]["history_limit"]
 
         host_ollama = config["ollama"]["host"]
-        timeout_ollama = config["ollama"].get("timeout", 60)
-        num_ctx = config["ollama"].get("num_ctx", 8192)
+        timeout_ollama = config["ollama"]["timeout"]
+        num_ctx = config["ollama"]["num_ctx"]
         limite_ricerca = config["memory"]["search_max_results"]
+
+        # Le root filesystem relative (es. "./workspace") si risolvono
+        # rispetto ad app_root, mai rispetto a cwd, data_root o
+        # resource_root.
+        contesto_filesystem = prepara_contesto_filesystem(
+            config,
+            percorsi.app_root,
+        )
 
         prompt = carica_prompt(percorsi.prompt_file)
 
@@ -51,6 +67,7 @@ def main() -> None:
         timeout_ollama,
     )
     except (
+        ErroreConfig,
         FileNotFoundError,
         json.JSONDecodeError,
         KeyError,
@@ -78,6 +95,7 @@ def main() -> None:
         stato_memoria,
         percorso_memoria,
         limite_ricerca,
+        contesto_filesystem,
 )
 
 if __name__ == "__main__":

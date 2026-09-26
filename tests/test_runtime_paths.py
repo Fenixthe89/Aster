@@ -2,6 +2,9 @@
 Aster 0.7.1a - Runtime Paths Foundation: test di modules/runtime_paths.py
 e del controllo legacy files.* in modules/config.py.
 
+0.7.1b: config_file sostituito da default_config_file (risorse),
+user_config_file (dati) e legacy_config_file (app_root).
+
 Le simulazioni Windows/Linux/macOS usano solo la parte pura del
 resolver (risolvi_percorsi, su PureWindowsPath/PurePosixPath): girano
 identiche su qualsiasi host. I test sul filesystem reale usano
@@ -152,7 +155,8 @@ class TestModalitaSorgente(unittest.TestCase):
     def test_path_equivalenti_alla_v068(self):
         # v0.6.8: BASE_DIR = cartella di aster.py (radice progetto),
         # CONFIG_FILE = BASE_DIR/"config.json", prompt e memoria da
-        # config["files"] con i valori legacy.
+        # config["files"] con i valori legacy. Dalla v0.7.1b quel
+        # config.json è la posizione legacy.
         for sistema, modulo, classe in (
             ("linux", MODULO_LINUX, PurePosixPath),
             ("win32", MODULO_WINDOWS, PureWindowsPath),
@@ -162,7 +166,7 @@ class TestModalitaSorgente(unittest.TestCase):
                 base_legacy = aster_py.parent
                 percorsi = _risolvi_sorgente(sistema, modulo)
 
-                self.assertEqual(percorsi.config_file, base_legacy / "config.json")
+                self.assertEqual(percorsi.legacy_config_file, base_legacy / "config.json")
                 self.assertEqual(percorsi.prompt_file, base_legacy / "prompt.txt")
                 self.assertEqual(percorsi.memory_file, base_legacy / "data/memory.json")
 
@@ -194,7 +198,9 @@ class TestModalitaSorgente(unittest.TestCase):
         self.assertEqual(percorsi.app_root, BASE_DIR)
         self.assertEqual(percorsi.resource_root, BASE_DIR)
         self.assertEqual(percorsi.data_root, BASE_DIR / "data")
-        self.assertEqual(percorsi.config_file, BASE_DIR / "config.json")
+        self.assertEqual(percorsi.default_config_file, BASE_DIR / "config.default.json")
+        self.assertEqual(percorsi.user_config_file, BASE_DIR / "data" / "config.json")
+        self.assertEqual(percorsi.legacy_config_file, BASE_DIR / "config.json")
         self.assertEqual(percorsi.prompt_file, BASE_DIR / "prompt.txt")
         self.assertEqual(percorsi.memory_file, BASE_DIR / "data/memory.json")
 
@@ -664,6 +670,145 @@ class TestNessunSideEffect(unittest.TestCase):
 
 
 # =====================================================================
+# FILE DI CONFIGURAZIONE (0.7.1b): default, utente, legacy
+# =====================================================================
+
+
+def _tutte_le_modalita():
+    """(descrizione, percorsi) per sorgente, frozen normale e portable."""
+
+    return (
+        ("source linux", _risolvi_sorgente("linux", MODULO_LINUX)),
+        ("source win32", _risolvi_sorgente("win32", MODULO_WINDOWS)),
+        ("normal win32", _windows({"LOCALAPPDATA": LOCALAPPDATA_WINDOWS})),
+        ("normal win32 onedir",
+         _risolvi_frozen("win32", EXE_WINDOWS, MEIPASS_ONEDIR_WINDOWS,
+                         {"LOCALAPPDATA": LOCALAPPDATA_WINDOWS})),
+        ("normal linux", _linux()),
+        ("normal darwin", _mac()),
+        ("portable win32",
+         _risolvi_frozen("win32", EXE_WINDOWS, MEIPASS_ONEFILE_WINDOWS,
+                         {"LOCALAPPDATA": LOCALAPPDATA_WINDOWS}, HOME_WINDOWS,
+                         marker=_SpiaMarker(True))),
+        ("portable linux",
+         _risolvi_frozen("linux", EXE_LINUX, MEIPASS_ONEFILE_LINUX, {},
+                         HOME_LINUX, marker=_SpiaMarker(True))),
+    )
+
+
+class TestFileDiConfigurazione(unittest.TestCase):
+
+    def test_sorgente(self):
+        for sistema, modulo, classe in (
+            ("linux", MODULO_LINUX, PurePosixPath),
+            ("win32", MODULO_WINDOWS, PureWindowsPath),
+        ):
+            with self.subTest(sistema=sistema):
+                percorsi = _risolvi_sorgente(sistema, modulo)
+                app_root = classe(modulo).parent.parent
+
+                self.assertEqual(percorsi.default_config_file,
+                                 app_root / "config.default.json")
+                self.assertEqual(percorsi.user_config_file,
+                                 app_root / "data" / "config.json")
+                self.assertEqual(percorsi.legacy_config_file,
+                                 app_root / "config.json")
+
+    def test_frozen_normale_windows(self):
+        percorsi = _windows({"LOCALAPPDATA": LOCALAPPDATA_WINDOWS})
+
+        self.assertEqual(percorsi.modalita, MODALITA_NORMALE)
+        self.assertEqual(percorsi.default_config_file,
+                         PureWindowsPath(MEIPASS_ONEFILE_WINDOWS) / "config.default.json")
+        self.assertEqual(percorsi.user_config_file,
+                         PureWindowsPath(LOCALAPPDATA_WINDOWS) / "Aster" / "config.json")
+        self.assertEqual(percorsi.legacy_config_file,
+                         PureWindowsPath(r"C:\Apps\Aster\config.json"))
+
+    def test_frozen_normale_linux_e_mac(self):
+        linux = _linux()
+        self.assertEqual(linux.default_config_file,
+                         PurePosixPath(MEIPASS_ONEFILE_LINUX) / "config.default.json")
+        self.assertEqual(linux.user_config_file,
+                         PurePosixPath("/home/utente/.local/share/aster/config.json"))
+        self.assertEqual(linux.legacy_config_file, PurePosixPath("/opt/aster/config.json"))
+
+        mac = _mac()
+        # Senza _MEIPASS le risorse coincidono con app_root.
+        self.assertEqual(mac.default_config_file,
+                         PurePosixPath("/Applications/Aster/config.default.json"))
+        self.assertEqual(
+            mac.user_config_file,
+            PurePosixPath("/Users/utente/Library/Application Support/Aster/config.json"),
+        )
+        self.assertEqual(mac.legacy_config_file,
+                         PurePosixPath("/Applications/Aster/config.json"))
+
+    def test_frozen_portable(self):
+        percorsi = _risolvi_frozen("win32", EXE_WINDOWS, MEIPASS_ONEFILE_WINDOWS,
+                                   {"LOCALAPPDATA": LOCALAPPDATA_WINDOWS},
+                                   HOME_WINDOWS, marker=_SpiaMarker(True))
+
+        self.assertEqual(percorsi.modalita, MODALITA_PORTABLE)
+        self.assertEqual(percorsi.user_config_file,
+                         PureWindowsPath(r"C:\Apps\Aster\data\config.json"))
+        self.assertEqual(percorsi.default_config_file,
+                         PureWindowsPath(MEIPASS_ONEFILE_WINDOWS) / "config.default.json")
+        self.assertEqual(percorsi.legacy_config_file,
+                         PureWindowsPath(r"C:\Apps\Aster\config.json"))
+
+    def test_invarianti_in_ogni_modalita(self):
+        for descrizione, percorsi in _tutte_le_modalita():
+            with self.subTest(modalita=descrizione):
+                self.assertEqual(percorsi.default_config_file.parent,
+                                 percorsi.resource_root)
+                self.assertEqual(percorsi.user_config_file.parent, percorsi.data_root)
+                self.assertEqual(percorsi.legacy_config_file.parent, percorsi.app_root)
+                self.assertEqual(percorsi.user_config_file.parent,
+                                 percorsi.memory_file.parent)
+
+                # Il legacy non coincide mai con il config utente: in
+                # nessuna modalità attuale data_root è app_root.
+                self.assertNotEqual(percorsi.legacy_config_file,
+                                    percorsi.user_config_file)
+                self.assertNotEqual(percorsi.default_config_file,
+                                    percorsi.user_config_file)
+
+    def test_config_utente_mai_dentro_meipass(self):
+        for descrizione, percorsi in _tutte_le_modalita():
+            if percorsi.resource_root == percorsi.app_root:
+                continue
+            with self.subTest(modalita=descrizione):
+                self.assertFalse(
+                    percorsi.user_config_file.is_relative_to(percorsi.resource_root)
+                )
+
+    def test_config_file_rimosso(self):
+        percorsi = _risolvi_sorgente("linux", MODULO_LINUX)
+        self.assertFalse(hasattr(percorsi, "config_file"))
+        self.assertFalse(hasattr(PercorsiRuntime, "config_file"))
+
+    def test_nessuna_io_path_puri(self):
+        # Su sistema simulato i path restano puri: calcolarli non può
+        # osservare né toccare il filesystem dell'host.
+        percorsi = _risolvi_sorgente("linux", MODULO_LINUX)
+        for percorso in (percorsi.default_config_file,
+                         percorsi.user_config_file,
+                         percorsi.legacy_config_file):
+            with self.subTest(percorso=str(percorso)):
+                self.assertIs(type(percorso), PurePosixPath)
+
+    def test_runtime_reale_veri_path(self):
+        percorsi = percorsi_runtime()
+        for percorso in (percorsi.default_config_file,
+                         percorsi.user_config_file,
+                         percorsi.legacy_config_file):
+            with self.subTest(percorso=percorso.name):
+                self.assertIsInstance(percorso, Path)
+                self.assertTrue(percorso.is_absolute())
+
+
+# =====================================================================
 # LEGACY files.*
 # =====================================================================
 
@@ -779,9 +924,11 @@ class TestFilesLegacy(unittest.TestCase):
 
 class TestConfinamentoRuntimePaths(unittest.TestCase):
 
-    def test_solo_chat_importa_runtime_paths_tra_i_moduli(self):
+    def test_nessun_modulo_importa_runtime_paths(self):
         # Nessun handler tool (system/filesystem/memory) vede le radici
         # runtime: non possono quindi finire in un risultato role=tool.
+        # Dalla v0.7.1b nemmeno chat.py: le radici le usa solo aster.py,
+        # che passa ad avvia_chat il ContestoFilesystem già preparato.
         import_runtime_paths = re.compile(
             r"^\s*(from\s+modules\.runtime_paths\s+import"
             r"|from\s+modules\s+import\s+.*\bruntime_paths\b"
@@ -792,7 +939,10 @@ class TestConfinamentoRuntimePaths(unittest.TestCase):
         for sorgente in (BASE_DIR / "modules").glob("*.py"):
             if import_runtime_paths.search(sorgente.read_text(encoding="utf-8")):
                 importatori.add(sorgente.name)
-        self.assertEqual(importatori, {"chat.py"})
+        self.assertEqual(importatori, set())
+
+        aster_py = (BASE_DIR / "aster.py").read_text(encoding="utf-8")
+        self.assertRegex(aster_py, import_runtime_paths)
 
     def test_nessuna_scrittura_nel_modulo(self):
         sorgente = (BASE_DIR / "modules" / "runtime_paths.py").read_text(encoding="utf-8")

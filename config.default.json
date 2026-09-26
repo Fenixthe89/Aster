@@ -12,17 +12,11 @@
     },
 
     "chat": {
-        "history_limit": 20,
-        "stream": true
+        "history_limit": 20
     },
 
     "memory": {
         "search_max_results": 5
-    },
-
-    "files": {
-        "prompt": "prompt.txt",
-        "memory": "data/memory.json"
     },
 
     "tools": {
