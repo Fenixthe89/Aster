@@ -1,7 +1,42 @@
 """Caricamento e validazione della configurazione di Aster."""
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+
+# Valori legacy (v0.6.8) di files.prompt/files.memory. Dalla v0.7.1a le
+# posizioni di prompt e memoria sono gestite da runtime_paths: queste
+# chiavi restano tollerate solo se equivalenti ai valori legacy.
+FILES_LEGACY = {
+    "prompt": ("prompt.txt",),
+    "memory": ("data", "memory.json"),
+}
+
+
+def _path_legacy_equivalente(
+    valore: str,
+    parti_attese: tuple,
+    classe_path: type[PurePath] = PurePath,
+) -> bool:
+    """
+    True se valore indica, secondo le regole di path del sistema
+    (classe_path, di default quello corrente), lo stesso path relativo
+    legacy: accetta per esempio "./data/memory.json". Rifiuta sempre
+    path vuoti, assoluti o ancorati (root/drive, in qualsiasi
+    convenzione) e qualsiasi componente "..".
+    """
+
+    if not valore or "\x00" in valore:
+        return False
+
+    if PurePosixPath(valore).anchor or PureWindowsPath(valore).anchor:
+        return False
+
+    candidato = classe_path(valore)
+
+    if ".." in candidato.parts:
+        return False
+
+    return candidato == classe_path(*parti_attese)
 
 
 def carica_config(config_file: Path) -> dict:
@@ -9,7 +44,7 @@ def carica_config(config_file: Path) -> dict:
     Legge la configurazione di Aster dal file indicato.
 
     Il percorso arriva come parametro perché il modulo non conosce
-    la posizione del progetto: quella la determina aster.py.
+    la posizione del progetto: quella la determina runtime_paths.
     """
 
     if not config_file.exists():
@@ -114,6 +149,39 @@ def carica_config(config_file: Path) -> dict:
                 raise TypeError(
                     "Ogni elemento di 'tools.filesystem.allowed_roots' in "
                     "config.json deve essere una stringa."
+                )
+
+    # I campi files.prompt/files.memory non possono più spostare prompt
+    # o memoria: i path reali arrivano da runtime_paths. Un valore
+    # personalizzato blocca l'avvio invece di essere ignorato in
+    # silenzio (Aster creerebbe una memoria nuova e vuota altrove).
+    # Assenti o legacy -> accettati. La sezione sparirà in 0.7.1b.
+    files_config = config.get("files")
+
+    if files_config is not None:
+        if not isinstance(files_config, dict):
+            raise TypeError(
+                "Il campo 'files' in config.json deve essere un oggetto."
+            )
+
+        for chiave, parti_attese in FILES_LEGACY.items():
+            if chiave not in files_config:
+                continue
+
+            valore = files_config[chiave]
+
+            if not isinstance(valore, str):
+                raise TypeError(
+                    f"Il campo 'files.{chiave}' in config.json deve essere "
+                    "una stringa."
+                )
+
+            if not _path_legacy_equivalente(valore, parti_attese):
+                raise ValueError(
+                    f"Il campo 'files.{chiave}' in config.json non può più "
+                    "essere personalizzato: la posizione del file è gestita "
+                    "da Aster. Ripristina il valore "
+                    f"\"{'/'.join(parti_attese)}\" oppure rimuovi il campo."
                 )
 
     return config

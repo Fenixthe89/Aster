@@ -20,6 +20,7 @@ from modules.ollama_manager import (
     esegui_risposta_finale,
     esegui_turno_con_tools,
 )
+from modules.runtime_paths import percorsi_runtime
 from modules.system_tools import (
     fallback_deterministico_sistema,
     registra_tool_sistema,
@@ -30,11 +31,6 @@ from modules.tool_response import (
     pulisci_testo_modello,
     raccogli_risposta_finale,
 )
-
-# Root dell'installazione di Aster (modules/chat.py -> radice progetto),
-# usata SOLO per risolvere le root filesystem relative di config.json
-# (es. "./workspace"), mai per assumere una directory di lavoro corrente.
-_BASE_DIR = Path(__file__).resolve().parent.parent
 
 TOOLS_RICERCA_MEMORIA = [
     tool
@@ -680,9 +676,15 @@ def avvia_chat(
     # Le root filesystem autorizzate vivono in config.json
     # (tools.filesystem.allowed_roots); avvia_chat non riceve ancora il
     # config grezzo dal chiamante, quindi lo rilegge qui una volta sola
-    # all'avvio della sessione, in modo self-contained.
-    config_filesystem = carica_config(_BASE_DIR / "config.json")
-    contesto_filesystem = prepara_contesto_filesystem(config_filesystem, _BASE_DIR)
+    # all'avvio della sessione, in modo self-contained. Le root relative
+    # (es. "./workspace") si risolvono rispetto ad app_root, mai rispetto
+    # a cwd, data_root o resource_root.
+    percorsi = percorsi_runtime()
+    config_filesystem = carica_config(percorsi.config_file)
+    contesto_filesystem = prepara_contesto_filesystem(
+        config_filesystem,
+        percorsi.app_root,
+    )
 
     while True:
         try:

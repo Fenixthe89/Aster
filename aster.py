@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import json
 
 from modules.config import carica_config
@@ -14,12 +12,7 @@ from modules.chat import avvia_chat
 
 from modules.memory import inizializza_memoria
 
-# ---------------------------------------------------------
-# PERCORSI DEL PROGETTO
-# ---------------------------------------------------------
-
-BASE_DIR = Path(__file__).resolve().parent
-CONFIG_FILE = BASE_DIR / "config.json"
+from modules.runtime_paths import percorsi_runtime
 
 # ---------------------------------------------------------
 # AVVIO DEL PROGRAMMA
@@ -29,7 +22,11 @@ def main() -> None:
     """Prepara Aster ed entra nella chat."""
 
     try:
-        config = carica_config(CONFIG_FILE)
+        # Percorsi di config, prompt e memoria: gestiti centralmente da
+        # runtime_paths (da sorgente identici alla v0.6.8).
+        percorsi = percorsi_runtime()
+
+        config = carica_config(percorsi.config_file)
 
         nome_assistente = config["assistant"]["name"]
         versione = config["assistant"]["version"]
@@ -42,10 +39,9 @@ def main() -> None:
         num_ctx = config["ollama"].get("num_ctx", 8192)
         limite_ricerca = config["memory"]["search_max_results"]
 
-        percorso_prompt = BASE_DIR / config["files"]["prompt"]
-        prompt = carica_prompt(percorso_prompt)
+        prompt = carica_prompt(percorsi.prompt_file)
 
-        percorso_memoria = BASE_DIR / config["files"]["memory"]
+        percorso_memoria = percorsi.memory_file
         stato_memoria = inizializza_memoria(percorso_memoria)
 
         print("Controllo connessione con Ollama...")
