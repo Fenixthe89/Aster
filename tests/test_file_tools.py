@@ -12,6 +12,10 @@ binario/testo, registrazione nel registry combinato, fallback
 deterministico e pipeline post-tool generica (incluso il gate
 sensitive_file che salta il secondo giro Ollama).
 
+0.7.1c: reserved_roots (DATA_ROOT) obbligatorio nel ContestoFilesystem
+e passato in entrambe le validazioni; deny generico, nessun I/O dentro
+la zona riservata, parent listing invariato.
+
 Usa esclusivamente tempfile/scratch: nessun file in data/ né in
 config.json reale viene mai letto o scritto. Nessuna chiamata a
 Ollama: esegui_risposta_finale viene sempre sostituita con un doppio
@@ -21,13 +25,17 @@ Esecuzione:
     python -m unittest discover -s tests -v
 """
 
+import ast
+import contextlib
 import json
+import os
 import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
@@ -160,7 +168,7 @@ class TestPreparaAllowedRoots(FileToolsTestCase):
         self.assertEqual(risultato, [assoluto])
 
     def test_prepara_contesto_filesystem_allowed_roots_assente(self):
-        contesto = prepara_contesto_filesystem({}, self.base_dir)
+        contesto = prepara_contesto_filesystem({}, self.base_dir, reserved_roots=())
 
         self.assertEqual(contesto.allowed_roots, [])
 
@@ -227,7 +235,7 @@ class TestListDirectory(FileToolsTestCase):
         self.root.mkdir()
         self.fuori = self.base_dir / "fuori"
         self.fuori.mkdir()
-        self.contesto = ContestoFilesystem(allowed_roots=[self.root])
+        self.contesto = ContestoFilesystem(allowed_roots=[self.root], reserved_roots=())
 
     def test_directory_autorizzata_success(self):
         (self.root / "a.txt").write_text("x")
@@ -390,12 +398,12 @@ class TestToctou(FileToolsTestCase):
         self.root_b.mkdir()
         (self.root_b / "solo_in_b.txt").write_text("x")
 
-        self.contesto = ContestoFilesystem(allowed_roots=[self.root_a])
+        self.contesto = ContestoFilesystem(allowed_roots=[self.root_a], reserved_roots=())
 
     def test_usa_resolved_path_della_validazione_finale(self):
         chiamate = []
 
-        def validazione_selettiva(path_richiesto, allowed_roots):
+        def validazione_selettiva(path_richiesto, allowed_roots, *, reserved_roots):
             chiamate.append(path_richiesto)
             if len(chiamate) == 1:
                 return PathDecision(allowed=True, resolved_path=self.root_a, reason="ok")
@@ -415,7 +423,7 @@ class TestToctou(FileToolsTestCase):
     def test_nessun_io_se_decisione_finale_nega(self):
         chiamate = []
 
-        def validazione_selettiva(path_richiesto, allowed_roots):
+        def validazione_selettiva(path_richiesto, allowed_roots, *, reserved_roots):
             chiamate.append(path_richiesto)
             if len(chiamate) == 1:
                 return PathDecision(allowed=True, resolved_path=self.root_a, reason="ok")
@@ -520,7 +528,7 @@ class TestPipelineFilesystem(FileToolsTestCase):
         self.root = self.base_dir / "root"
         self.root.mkdir()
         (self.root / "a.txt").write_text("x")
-        contesto = ContestoFilesystem(allowed_roots=[self.root])
+        contesto = ContestoFilesystem(allowed_roots=[self.root], reserved_roots=())
         self.risultato_tool = list_directory({"path": "."}, contesto)
 
     def test_secondo_giro_riuscito(self):
@@ -609,7 +617,7 @@ class TestReadFileBase(FileToolsTestCase):
         self.root.mkdir()
         self.fuori = self.base_dir / "fuori"
         self.fuori.mkdir()
-        self.contesto = ContestoFilesystem(allowed_roots=[self.root])
+        self.contesto = ContestoFilesystem(allowed_roots=[self.root], reserved_roots=())
 
     def test_success_utf8(self):
         (self.root / "a.txt").write_text("Ciao mondo àèìòù", encoding="utf-8")
@@ -750,7 +758,7 @@ class TestReadFileNomeSensibile(FileToolsTestCase):
         super().setUp()
         self.root = self.base_dir / "root"
         self.root.mkdir()
-        self.contesto = ContestoFilesystem(allowed_roots=[self.root])
+        self.contesto = ContestoFilesystem(allowed_roots=[self.root], reserved_roots=())
 
     def _crea_e_leggi(self, nome_file: str) -> dict:
         (self.root / nome_file).write_text("contenuto qualsiasi")
@@ -808,7 +816,7 @@ class TestReadFileContenutoSensibile(FileToolsTestCase):
         super().setUp()
         self.root = self.base_dir / "root"
         self.root.mkdir()
-        self.contesto = ContestoFilesystem(allowed_roots=[self.root])
+        self.contesto = ContestoFilesystem(allowed_roots=[self.root], reserved_roots=())
 
     def _scrivi_e_leggi(self, contenuto: str) -> dict:
         # Nome sempre innocuo: qui testiamo il guard sul CONTENUTO, non
@@ -907,7 +915,7 @@ class TestReadFileSymlink(FileToolsTestCase):
         self.root.mkdir()
         self.fuori = self.base_dir / "fuori"
         self.fuori.mkdir()
-        self.contesto = ContestoFilesystem(allowed_roots=[self.root])
+        self.contesto = ContestoFilesystem(allowed_roots=[self.root], reserved_roots=())
 
     def test_symlink_interno_verso_file_interno_consentito(self):
         target = self.root / "reale.txt"
@@ -979,12 +987,12 @@ class TestReadFileToctou(FileToolsTestCase):
         self.root_b.mkdir()
         (self.root_b / "solo_in_b.txt").write_text("contenuto B")
 
-        self.contesto = ContestoFilesystem(allowed_roots=[self.root_a])
+        self.contesto = ContestoFilesystem(allowed_roots=[self.root_a], reserved_roots=())
 
     def test_usa_resolved_path_della_validazione_finale(self):
         chiamate = []
 
-        def validazione_selettiva(path_richiesto, allowed_roots):
+        def validazione_selettiva(path_richiesto, allowed_roots, *, reserved_roots):
             chiamate.append(path_richiesto)
             if len(chiamate) == 1:
                 return PathDecision(
@@ -1011,7 +1019,7 @@ class TestReadFileToctou(FileToolsTestCase):
     def test_nessun_open_se_decisione_finale_nega(self):
         chiamate = []
 
-        def validazione_selettiva(path_richiesto, allowed_roots):
+        def validazione_selettiva(path_richiesto, allowed_roots, *, reserved_roots):
             chiamate.append(path_richiesto)
             if len(chiamate) == 1:
                 return PathDecision(
@@ -1049,7 +1057,7 @@ class TestReadFileResultSecurity(FileToolsTestCase):
         super().setUp()
         self.root = self.base_dir / "root"
         self.root.mkdir()
-        self.contesto = ContestoFilesystem(allowed_roots=[self.root])
+        self.contesto = ContestoFilesystem(allowed_roots=[self.root], reserved_roots=())
 
     def test_sensitive_file_non_contiene_content(self):
         (self.root / ".env").write_text("SEGRETO=xyz")
@@ -1098,7 +1106,7 @@ class TestReadFilePipelineSicurezza(FileToolsTestCase):
         super().setUp()
         self.root = self.base_dir / "root"
         self.root.mkdir()
-        self.contesto = ContestoFilesystem(allowed_roots=[self.root])
+        self.contesto = ContestoFilesystem(allowed_roots=[self.root], reserved_roots=())
 
     def test_read_success_arriva_a_secondo_giro(self):
         (self.root / "a.txt").write_text("contenuto pubblico")
@@ -1200,6 +1208,312 @@ class TestReadFilePipelineSicurezza(FileToolsTestCase):
         self.assertIn("sensibil", testo.lower())
         self.assertNotIn(":\\", testo)
         self.assertNotIn("/home/", testo)
+
+
+# =====================================================================
+# RESERVED ROOTS (0.7.1c)
+# =====================================================================
+
+
+class ReservedFileToolsTestCase(FileToolsTestCase):
+    """Layout sorgente in tempfile: APP allowed, APP/data reserved."""
+
+    def setUp(self):
+        super().setUp()
+        self.app = self.base_dir.resolve() / "app"
+        self.data = self.app / "data"
+        (self.data / "sub").mkdir(parents=True)
+        (self.app / "prompt.txt").write_text("contenuto pubblico", encoding="utf-8")
+        (self.data / "memory.json").write_text('{"nota": "SEGRETO_MEMORIA"}', encoding="utf-8")
+        (self.data / "config.json").write_text('{"nota": "SEGRETO_CONFIG"}', encoding="utf-8")
+        (self.data / "sub" / "x.txt").write_text("SEGRETO_SUB", encoding="utf-8")
+        self.contesto = ContestoFilesystem(allowed_roots=[self.app], reserved_roots=(self.data,))
+
+    def _assert_deny_generico(self, risultato, operation):
+        self.assertEqual(risultato, {"ok": False, "operation": operation, "status": "access_denied"})
+
+
+class TestReservedFileTools(ReservedFileToolsTestCase):
+
+    def test_listing_parent_mostra_data(self):
+        risultato = list_directory({"path": "."}, self.contesto)
+
+        self.assertEqual(risultato["status"], "success")
+        entries = risultato["data"]["entries"]
+        self.assertIn({"name": "data", "type": "directory"}, entries)
+        self.assertIn({"name": "prompt.txt", "type": "file"}, entries)
+
+    def test_listing_data_deny(self):
+        for path in ("data", "data/", "data/.", str(self.data)):
+            with self.subTest(path=path):
+                self._assert_deny_generico(
+                    list_directory({"path": path}, self.contesto), "list_directory"
+                )
+
+    def test_listing_data_sub_deny(self):
+        for path in ("data/sub", str(self.data / "sub"), "data/inesistente"):
+            with self.subTest(path=path):
+                self._assert_deny_generico(
+                    list_directory({"path": path}, self.contesto), "list_directory"
+                )
+
+    def test_read_memory_e_config_deny(self):
+        for path in ("data/memory.json", "data/config.json", "data/sub/x.txt",
+                     str(self.data / "memory.json")):
+            with self.subTest(path=path):
+                self._assert_deny_generico(read_file({"path": path}, self.contesto), "read_file")
+
+    def test_read_inesistente_in_reserved_deny_non_not_found(self):
+        # access_denied prima di qualsiasi I/O: nessun oracolo di esistenza.
+        for path in ("data/inesistente.txt", "data/nuova/file.txt"):
+            with self.subTest(path=path):
+                self._assert_deny_generico(read_file({"path": path}, self.contesto), "read_file")
+
+    def test_sibling_leggibile(self):
+        for path in ("prompt.txt", "data/../prompt.txt"):
+            with self.subTest(path=path):
+                risultato = read_file({"path": path}, self.contesto)
+                self.assertEqual(risultato["status"], "success")
+                self.assertEqual(risultato["data"]["content"], "contenuto pubblico")
+
+    def test_output_deny_generico_senza_path_ne_contenuto(self):
+        risultati = [
+            list_directory({"path": "data"}, self.contesto),
+            list_directory({"path": "data/sub"}, self.contesto),
+            read_file({"path": "data/memory.json"}, self.contesto),
+            read_file({"path": "data/config.json"}, self.contesto),
+            read_file({"path": "data/inesistente.txt"}, self.contesto),
+        ]
+
+        serializzato = json.dumps(risultati, ensure_ascii=False)
+        for vietato in (str(self.base_dir), str(self.app), str(self.data), "memory.json",
+                        "config.json", "SEGRETO", "reserved", "data_root"):
+            with self.subTest(vietato=vietato):
+                self.assertNotIn(vietato, serializzato)
+        for risultato in risultati:
+            self.assertEqual(set(risultato), {"ok", "operation", "status"})
+
+        # Anche il fallback deterministico resta quello generico.
+        self.assertEqual(fallback_deterministico_file(risultati[2]), "Non ho accesso a quel file.")
+        self.assertEqual(fallback_deterministico_file(risultati[0]),
+                         "Non ho accesso a quella posizione.")
+
+    def test_nessun_io_dentro_reserved(self):
+        def sorvegliato(nome):
+            originale = getattr(Path, nome)
+
+            def wrapper(percorso, *args, **kwargs):
+                if percorso.is_relative_to(self.data):
+                    raise AssertionError(f"Path.{nome} chiamato dentro la reserved")
+                return originale(percorso, *args, **kwargs)
+
+            return wrapper
+
+        with contextlib.ExitStack() as pila:
+            for nome in ("open", "iterdir", "exists", "is_file", "is_dir",
+                         "read_bytes", "read_text"):
+                pila.enter_context(mock.patch.object(Path, nome, sorvegliato(nome)))
+
+            for path in ("data", "data/sub"):
+                self._assert_deny_generico(
+                    list_directory({"path": path}, self.contesto), "list_directory"
+                )
+            for path in ("data/memory.json", "data/config.json", "data/inesistente.txt"):
+                self._assert_deny_generico(read_file({"path": path}, self.contesto), "read_file")
+
+            # Il sibling resta leggibile anche con la sorveglianza attiva.
+            self.assertEqual(read_file({"path": "prompt.txt"}, self.contesto)["status"],
+                             "success")
+
+    def test_entrambe_le_validazioni_passano_reserved_roots(self):
+        chiamate = []
+        originale = file_tools.risolvi_path_autorizzato
+
+        def spia(path_richiesto, allowed_roots, *, reserved_roots):
+            chiamate.append(reserved_roots)
+            return originale(path_richiesto, allowed_roots, reserved_roots=reserved_roots)
+
+        with mock.patch.object(file_tools, "risolvi_path_autorizzato", spia):
+            list_directory({"path": "."}, self.contesto)
+            read_file({"path": "prompt.txt"}, self.contesto)
+
+        self.assertEqual(len(chiamate), 4)
+        for reserved in chiamate:
+            self.assertIs(reserved, self.contesto.reserved_roots)
+
+    def test_seconda_validazione_riapplica_reserved(self):
+        # Un symlink verso data compare tra la prima e la seconda
+        # validazione: la seconda lo nega e nessun I/O viene eseguito.
+        prova = self.app / "prova_link"
+        if not _symlink_supportato(self.data, prova):
+            self.skipTest("symlink di directory non supportato su questa piattaforma")
+        os.unlink(prova)
+
+        originale = file_tools.risolvi_path_autorizzato
+
+        for strumento, path in ((read_file, "alias/memory.json"), (list_directory, "alias")):
+            with self.subTest(strumento=strumento.__name__):
+                link = self.app / "alias"
+                esiti = []
+
+                def spia(path_richiesto, allowed_roots, *, reserved_roots):
+                    decisione = originale(path_richiesto, allowed_roots,
+                                          reserved_roots=reserved_roots)
+                    esiti.append(decisione.allowed)
+                    if len(esiti) == 1:
+                        link.symlink_to(self.data, target_is_directory=True)
+                    return decisione
+
+                with mock.patch.object(file_tools, "risolvi_path_autorizzato", spia):
+                    risultato = strumento({"path": path}, self.contesto)
+
+                os.unlink(link)
+                self.assertEqual(esiti, [True, False])
+                self._assert_deny_generico(risultato, strumento.__name__)
+
+    def test_symlink_verso_reserved_deny(self):
+        link = self.app / "alias"
+        if not _symlink_supportato(self.data, link):
+            self.skipTest("symlink di directory non supportato su questa piattaforma")
+
+        self._assert_deny_generico(list_directory({"path": "alias"}, self.contesto),
+                                   "list_directory")
+        self._assert_deny_generico(list_directory({"path": "alias/sub"}, self.contesto),
+                                   "list_directory")
+        self._assert_deny_generico(read_file({"path": "alias/memory.json"}, self.contesto),
+                                   "read_file")
+
+        link_file = self.app / "memoria.json"
+        if not _symlink_file_supportato(self.data / "memory.json", link_file):
+            self.skipTest("symlink di file non supportato su questa piattaforma")
+        self._assert_deny_generico(read_file({"path": "memoria.json"}, self.contesto),
+                                   "read_file")
+
+
+class TestReservedFrozenLike(FileToolsTestCase):
+    """APP_ROOT e DATA_ROOT separati; il parent di DATA_ROOT e' autorizzato."""
+
+    def setUp(self):
+        super().setUp()
+        base = self.base_dir.resolve()
+        self.app = base / "Programmi" / "Aster"
+        self.app.mkdir(parents=True)
+        self.local = base / "LocalAppData"
+        self.data = self.local / "Aster"
+        self.data.mkdir(parents=True)
+        (self.local / "altro.txt").write_text("vicino", encoding="utf-8")
+        (self.data / "memory.json").write_text('{"nota": "SEGRETO"}', encoding="utf-8")
+        (self.data / "config.json").write_text("{}", encoding="utf-8")
+        self.contesto = ContestoFilesystem(allowed_roots=[self.local], reserved_roots=(self.data,))
+
+    def test_sibling_del_data_root_leggibile(self):
+        risultato = read_file({"path": "altro.txt"}, self.contesto)
+        self.assertEqual(risultato["status"], "success")
+        self.assertEqual(risultato["data"]["content"], "vicino")
+
+    def test_parent_elenca_data_root(self):
+        risultato = list_directory({"path": "."}, self.contesto)
+        self.assertIn({"name": "Aster", "type": "directory"}, risultato["data"]["entries"])
+
+    def test_data_root_e_contenuto_negati(self):
+        deny = {"ok": False, "status": "access_denied"}
+        for path in ("Aster", str(self.data)):
+            with self.subTest(path=path):
+                self.assertEqual(list_directory({"path": path}, self.contesto),
+                                 {**deny, "operation": "list_directory"})
+        for path in ("Aster/memory.json", "Aster/config.json", "Aster/nuovo.txt",
+                     str(self.data / "memory.json")):
+            with self.subTest(path=path):
+                self.assertEqual(read_file({"path": path}, self.contesto),
+                                 {**deny, "operation": "read_file"})
+
+    def test_app_root_autorizzata_non_tocca_data_root(self):
+        contesto = ContestoFilesystem(allowed_roots=[self.app], reserved_roots=(self.data,))
+        self.assertEqual(list_directory({"path": "."}, contesto)["status"], "success")
+        self.assertEqual(read_file({"path": str(self.data / "memory.json")}, contesto)["status"],
+                         "access_denied")
+
+
+class TestContestoReservedObbligatorio(unittest.TestCase):
+
+    def test_reserved_roots_senza_default(self):
+        with self.assertRaises(TypeError):
+            ContestoFilesystem(allowed_roots=[])
+
+    def test_reserved_roots_keyword_only(self):
+        with self.assertRaises(TypeError):
+            ContestoFilesystem([], ())
+
+    def test_reserved_roots_deve_essere_tupla(self):
+        for valore in ([], None, "C:\\dati", Path("dati"), frozenset()):
+            with self.subTest(valore=repr(valore)):
+                with self.assertRaises(TypeError):
+                    ContestoFilesystem(allowed_roots=[], reserved_roots=valore)
+
+    def test_tupla_vuota_valida_solo_se_esplicita(self):
+        contesto = ContestoFilesystem(allowed_roots=[], reserved_roots=())
+        self.assertEqual(contesto.reserved_roots, ())
+
+    def test_prepara_richiede_reserved_keyword_only(self):
+        base = Path(tempfile.gettempdir()) / "aster_app_simulata"
+        with self.assertRaises(TypeError):
+            prepara_contesto_filesystem({}, base)
+        with self.assertRaises(TypeError):
+            prepara_contesto_filesystem({}, base, (base / "data",))
+        for singolo in (str(base / "data"), base / "data", b"dati"):
+            with self.subTest(singolo=repr(singolo)):
+                with self.assertRaises(TypeError):
+                    prepara_contesto_filesystem({}, base, reserved_roots=singolo)
+
+    def test_prepara_fissa_tupla_e_ignora_il_config(self):
+        # Nessuna I/O: path simulati. reserved_roots nel config non conta.
+        base = Path(tempfile.gettempdir()) / "aster_app_simulata"
+        riservata = base / "data"
+        config = {"tools": {"filesystem": {"allowed_roots": ["."],
+                                           "reserved_roots": ["altro"]}}}
+
+        contesto = prepara_contesto_filesystem(config, base, reserved_roots=[riservata])
+
+        self.assertEqual(contesto.reserved_roots, (riservata,))
+        self.assertIsInstance(contesto.reserved_roots, tuple)
+        self.assertEqual(contesto.allowed_roots, [base])
+
+    def test_produzione_costruisce_il_contesto_solo_in_prepara(self):
+        costruttori = []
+        for sorgente in (BASE_DIR / "modules").glob("*.py"):
+            albero = ast.parse(sorgente.read_text(encoding="utf-8"))
+            for funzione in ast.walk(albero):
+                if not isinstance(funzione, ast.FunctionDef):
+                    continue
+                for nodo in ast.walk(funzione):
+                    if isinstance(nodo, ast.Call) and getattr(nodo.func, "id", None) == "ContestoFilesystem":
+                        costruttori.append((sorgente.name, funzione.name))
+
+        self.assertEqual(costruttori, [("file_tools.py", "prepara_contesto_filesystem")])
+
+    def test_produzione_passa_sempre_reserved_non_vuote(self):
+        # Ogni chiamata production alla policy e a prepara passa
+        # reserved_roots esplicito, mai la tupla vuota letterale.
+        sorgenti = [*(BASE_DIR / "modules").glob("*.py"), BASE_DIR / "aster.py"]
+        chiamate = []
+        for sorgente in sorgenti:
+            for nodo in ast.walk(ast.parse(sorgente.read_text(encoding="utf-8"))):
+                if not isinstance(nodo, ast.Call):
+                    continue
+                nome = getattr(nodo.func, "id", None) or getattr(nodo.func, "attr", None)
+                if nome not in {"risolvi_path_autorizzato", "prepara_contesto_filesystem"}:
+                    continue
+                chiamate.append((sorgente.name, nome))
+                keyword = {k.arg: k.value for k in nodo.keywords}
+                self.assertIn("reserved_roots", keyword, msg=f"{sorgente.name}:{nodo.lineno}")
+                valore = keyword["reserved_roots"]
+                self.assertFalse(isinstance(valore, ast.Tuple) and not valore.elts,
+                                 msg=f"{sorgente.name}:{nodo.lineno}")
+
+        self.assertEqual(sorted(chiamate), sorted([
+            ("aster.py", "prepara_contesto_filesystem"),
+            *[("file_tools.py", "risolvi_path_autorizzato")] * 4,
+        ]))
 
 
 if __name__ == "__main__":

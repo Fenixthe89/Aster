@@ -44,8 +44,9 @@ from modules.config import (
     carica_config,
     carica_config_runtime,
 )
+from modules.file_tools import list_directory, read_file
 from modules.memory import MODALITA_NORMALE, StatoMemoria
-from modules.runtime_paths import MODALITA_PORTABLE, PercorsiRuntime
+from modules.runtime_paths import MODALITA_PORTABLE, MODALITA_SORGENTE, PercorsiRuntime
 
 
 def _config_base(ollama_extra: dict | None = None) -> dict:
@@ -526,6 +527,17 @@ class TestConfigUtenteNonValida(_BaseLivelli):
         ):
             with self.subTest(utente=utente):
                 self._assert_rifiutato(utente, vietati=("temperature", "shell", "denied_roots"))
+
+    def test_reserved_roots_non_configurabile(self):
+        # 0.7.1c: le reserved roots sono solo runtime. La whitelist 0.7.1b
+        # rifiuta già la chiave, anche insieme a un override valido.
+        for utente in (
+            {"tools": {"filesystem": {"reserved_roots": []}}},
+            {"tools": {"filesystem": {"allowed_roots": ["."], "reserved_roots": []}}},
+            {"reserved_roots": []},
+        ):
+            with self.subTest(utente=utente):
+                self._assert_rifiutato(utente, vietati=("reserved_roots",))
 
     def test_typo_num_ctz(self):
         messaggio = self._assert_rifiutato({"ollama": {"num_ctz": 16384}},
@@ -1039,6 +1051,7 @@ class TestAvvioAsterSingleLoad(_BaseLivelli):
         self.assertEqual(self.percorsi.legacy_config_file, self.legacy_file)
 
         self.preparazioni = []
+        self.reserved_passate = []
         self.avvii_chat = []
         self.controlli_ollama = []
         self.memorie = []
@@ -1046,9 +1059,10 @@ class TestAvvioAsterSingleLoad(_BaseLivelli):
     def _esegui_main(self):
         prepara_reale = aster.prepara_contesto_filesystem
 
-        def prepara_spia(config, base_dir):
-            contesto = prepara_reale(config, base_dir)
+        def prepara_spia(config, base_dir, *, reserved_roots):
+            contesto = prepara_reale(config, base_dir, reserved_roots=reserved_roots)
             self.preparazioni.append((copy.deepcopy(config), base_dir, contesto))
+            self.reserved_passate.append(reserved_roots)
             return contesto
 
         def memoria_finta(percorso):
@@ -1141,6 +1155,57 @@ class TestAvvioAsterSingleLoad(_BaseLivelli):
         self.assertNotIn("999", uscita.replace(str(self.tmp), "<tmp>"))
         self.assertEqual(self.preparazioni, [])
         self.assertEqual(self.avvii_chat, [])
+
+    # --- 0.7.1c: DATA_ROOT riservata ---------------------------------
+
+    def test_data_root_passata_come_reserved(self):
+        # Layout con DATA_ROOT separata da APP_ROOT (come frozen).
+        self._esegui_main()
+
+        self.assertEqual(self.reserved_passate, [(self.dati,)])
+        contesto = self.avvii_chat[0][-1]
+        self.assertEqual(contesto.reserved_roots, (self.dati,))
+
+    def test_source_allowed_punto_data_root_resta_riservata(self):
+        # Layout sorgente: risorse in app_root, dati in app_root/data.
+        self.percorsi = PercorsiRuntime(
+            modalita=MODALITA_SORGENTE,
+            app_root=self.app,
+            resource_root=self.app,
+            data_root=self.app / "data",
+        )
+        dati = self.percorsi.data_root
+        dati.mkdir()
+        self._scrivi_json(self.percorsi.default_config_file, _default_test())
+        (self.app / "prompt.txt").write_text("prompt di test", encoding="utf-8")
+        self._scrivi_json(self.percorsi.user_config_file,
+                          {"tools": {"filesystem": {"allowed_roots": ["."]}}})
+        (dati / "memory.json").write_text(json.dumps({"nota": SEGRETO}), encoding="utf-8")
+
+        self._esegui_main()
+
+        self.assertEqual(self.reserved_passate, [(dati,)])
+        contesto = self.avvii_chat[0][-1]
+        self.assertEqual(contesto.allowed_roots, [self.app])
+        self.assertEqual(contesto.reserved_roots, (dati,))
+
+        # File normale accessibile; il parent elenca "data".
+        self.assertEqual(read_file({"path": "prompt.txt"}, contesto)["status"], "success")
+        elenco = list_directory({"path": "."}, contesto)
+        self.assertIn({"name": "data", "type": "directory"}, elenco["data"]["entries"])
+
+        # data/* resta carve-out, con deny generico.
+        risultati = [
+            read_file({"path": "data/memory.json"}, contesto),
+            read_file({"path": "data/config.json"}, contesto),
+            list_directory({"path": "data"}, contesto),
+        ]
+        for risultato in risultati:
+            self.assertEqual(
+                risultato,
+                {"ok": False, "operation": risultato["operation"], "status": "access_denied"},
+            )
+        self.assertNotIn(SEGRETO, json.dumps(risultati))
 
 
 if __name__ == "__main__":

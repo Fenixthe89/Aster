@@ -520,7 +520,7 @@ class TestRollbackTurno(unittest.TestCase):
                     "http://localhost:11434", 60, 8192,
                     StatoMemoria(modalita=MODALITA_NORMALE, memoria=None),
                     self.tmp / "memory.json", 5,
-                    ContestoFilesystem(allowed_roots=[]),
+                    ContestoFilesystem(allowed_roots=[], reserved_roots=()),
                 )
         finally:
             builtins.input = input_originale
@@ -661,7 +661,7 @@ class TestAvviaChatSenzaConfig(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="aster_test_contesto_"))
         self.addCleanup(shutil.rmtree, tmp, True)
 
-        contesto_ricevuto = ContestoFilesystem(allowed_roots=[tmp / "root"])
+        contesto_ricevuto = ContestoFilesystem(allowed_roots=[tmp / "root"], reserved_roots=())
         contesti_visti = []
 
         def handler_filesystem(argomenti, contesto):

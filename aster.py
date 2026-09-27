@@ -49,10 +49,12 @@ def main() -> None:
 
         # Le root filesystem relative (es. "./workspace") si risolvono
         # rispetto ad app_root, mai rispetto a cwd, data_root o
-        # resource_root.
+        # resource_root. data_root è riservata: unica fonte runtime,
+        # mai dal config, prevale su qualsiasi allowed root.
         contesto_filesystem = prepara_contesto_filesystem(
             config,
             percorsi.app_root,
+            reserved_roots=(percorsi.data_root,),
         )
 
         prompt = carica_prompt(percorsi.prompt_file)

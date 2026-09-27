@@ -1,8 +1,9 @@
 """Tool filesystem di Aster: list_directory e read_file (dominio "filesystem")."""
 
+import os
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from modules.filesystem_policy import risolvi_path_autorizzato
@@ -67,9 +68,21 @@ TOOLS_FILE = [
 
 @dataclass
 class ContestoFilesystem:
-    """Stato minimo richiesto dagli handler filesystem: solo le root autorizzate."""
+    """
+    Stato minimo richiesto dagli handler filesystem.
+
+    allowed_roots arrivano dal config utente; reserved_roots solo dal
+    runtime di Aster (es. DATA_ROOT). reserved_roots e' obbligatorio e
+    senza default: dimenticarlo deve fallire subito, non degradare in
+    silenzio a nessuna zona riservata. () vale solo se esplicito.
+    """
 
     allowed_roots: list
+    reserved_roots: tuple = field(kw_only=True)
+
+    def __post_init__(self):
+        if not isinstance(self.reserved_roots, tuple):
+            raise TypeError("reserved_roots deve essere una tupla.")
 
 
 def _prepara_allowed_roots(allowed_roots_raw, base_dir: Path) -> list:
@@ -100,20 +113,33 @@ def _prepara_allowed_roots(allowed_roots_raw, base_dir: Path) -> list:
     return roots_preparate
 
 
-def prepara_contesto_filesystem(config: dict, base_dir: Path) -> ContestoFilesystem:
+def prepara_contesto_filesystem(
+    config: dict,
+    base_dir: Path,
+    *,
+    reserved_roots,
+) -> ContestoFilesystem:
     """
     Costruisce il ContestoFilesystem da passare al dispatch per i tool
     filesystem, leggendo config["tools"]["filesystem"]["allowed_roots"].
     Assente o vuota -> nessuna root preparata -> default deny (la
     validazione stessa vive comunque in filesystem_policy.py).
+
+    reserved_roots arriva solo dal chiamante (runtime), mai dal config.
+    Viene fissato in una tupla senza risolverlo: resolve e identita'
+    li ricalcola filesystem_policy a ogni decisione.
     """
+
+    if isinstance(reserved_roots, (str, bytes, os.PathLike)):
+        raise TypeError("reserved_roots deve essere una collezione di path.")
 
     tools_config = config.get("tools", {})
     filesystem_config = tools_config.get("filesystem", {}) if isinstance(tools_config, dict) else {}
     allowed_roots_raw = filesystem_config.get("allowed_roots", []) if isinstance(filesystem_config, dict) else []
 
     return ContestoFilesystem(
-        allowed_roots=_prepara_allowed_roots(allowed_roots_raw or [], base_dir)
+        allowed_roots=_prepara_allowed_roots(allowed_roots_raw or [], base_dir),
+        reserved_roots=tuple(reserved_roots),
     )
 
 
@@ -178,14 +204,19 @@ def list_directory(argomenti: dict, contesto: ContestoFilesystem) -> dict:
 
     path_richiesto = argomenti.get("path") if isinstance(argomenti, dict) else None
     allowed_roots = contesto.allowed_roots if contesto is not None else []
+    reserved_roots = contesto.reserved_roots if contesto is not None else ()
 
-    decisione = risolvi_path_autorizzato(path_richiesto, allowed_roots)
+    decisione = risolvi_path_autorizzato(
+        path_richiesto, allowed_roots, reserved_roots=reserved_roots
+    )
     if not decisione.allowed:
         return _risultato_deny("list_directory", "access_denied")
 
     # Rivalidazione immediatamente prima dell'I/O: usiamo esclusivamente
-    # il resolved_path di QUESTA seconda decisione.
-    decisione_finale = risolvi_path_autorizzato(path_richiesto, allowed_roots)
+    # il resolved_path di QUESTA seconda decisione (reserved incluse).
+    decisione_finale = risolvi_path_autorizzato(
+        path_richiesto, allowed_roots, reserved_roots=reserved_roots
+    )
     if not decisione_finale.allowed:
         return _risultato_deny("list_directory", "access_denied")
 
@@ -428,12 +459,17 @@ def read_file(argomenti: dict, contesto: ContestoFilesystem) -> dict:
 
     path_richiesto = argomenti.get("path") if isinstance(argomenti, dict) else None
     allowed_roots = contesto.allowed_roots if contesto is not None else []
+    reserved_roots = contesto.reserved_roots if contesto is not None else ()
 
-    decisione = risolvi_path_autorizzato(path_richiesto, allowed_roots)
+    decisione = risolvi_path_autorizzato(
+        path_richiesto, allowed_roots, reserved_roots=reserved_roots
+    )
     if not decisione.allowed:
         return _risultato_deny("read_file", "access_denied")
 
-    decisione_finale = risolvi_path_autorizzato(path_richiesto, allowed_roots)
+    decisione_finale = risolvi_path_autorizzato(
+        path_richiesto, allowed_roots, reserved_roots=reserved_roots
+    )
     if not decisione_finale.allowed:
         return _risultato_deny("read_file", "access_denied")
 
