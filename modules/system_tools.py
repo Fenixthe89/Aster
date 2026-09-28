@@ -1,23 +1,38 @@
 """Tool non-memory di Aster: informazioni di sistema reali (dominio "system")."""
 
-import os
+import math
 import platform
 import shutil
+import time
 import unicodedata
 from pathlib import Path
 
 from modules.tool_registry import RegistroStrumenti, ToolSpec
 
-# Import protetto: se psutil manca, Aster parte comunque e solo
-# list_processes risponde con un tool_error fisso.
+# Import protetto: se psutil manca, Aster parte comunque; list_processes
+# risponde con un tool_error fisso e get_system_info con metriche None.
 try:
     import psutil
 except ImportError:
     psutil = None
 
+# winreg esiste solo su Windows: altrove il modello CPU usa il fallback.
+try:
+    import winreg
+except ImportError:
+    winreg = None
+
 # Limite di processi restituiti da list_processes: il risultato entra
 # in role="tool" e resta in cronologia, quindi va tenuto contenuto.
 MAX_PROCESS_ENTRIES = 50
+
+# Finestra di campionamento di cpu_percent: con interval=None le
+# chiamate di un processo appena avviato o ravvicinate restituiscono
+# 0.0 privo di significato; 0.1 s è la latenza accettata per un dato reale.
+CPU_USAGE_INTERVAL_SECONDS = 0.1
+
+_CHIAVE_REGISTRO_CPU = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+_VALORE_REGISTRO_CPU = "ProcessorNameString"
 
 _MAX_LUNGHEZZA_FILTRO = 64
 _MAX_LUNGHEZZA_NOME_PROCESSO = 255
@@ -93,15 +108,194 @@ TOOLS_SISTEMA = [
 ]
 
 
+def _intero_positivo(valore) -> int | None:
+    """valore se è un int vero (bool escluso) > 0, altrimenti None."""
+
+    if type(valore) is int and valore > 0:
+        return valore
+    return None
+
+
+def _intero_non_negativo(valore) -> int | None:
+    """valore se è un int vero (bool escluso) >= 0, altrimenti None."""
+
+    if type(valore) is int and valore >= 0:
+        return valore
+    return None
+
+
+def _percentuale(valore) -> float | None:
+    """float in [0, 100] se valore è un numero finito (bool escluso), altrimenti None."""
+
+    if isinstance(valore, bool) or not isinstance(valore, (int, float)):
+        return None
+
+    # Range prima di isfinite: NaN fallisce il confronto e un int enorme
+    # viene scartato senza OverflowError nella conversione a float.
+    if not 0 <= valore <= 100 or not math.isfinite(valore):
+        return None
+
+    return float(valore)
+
+
+def _percentuale_intera(valore) -> int | None:
+    """Percentuale validata, arrotondata all'intero con .5 per eccesso (no banker's rounding)."""
+
+    # Il modello legge male i decimali sotto 1 (0.6 -> "60%"): all'LLM solo interi.
+    percentuale = _percentuale(valore)
+    if percentuale is None:
+        return None
+    return int(percentuale + 0.5)
+
+
+def _raccogli(collettore):
+    """Esegue un singolo collector: qualunque errore locale diventa None."""
+
+    try:
+        return collettore()
+    except Exception:
+        return None
+
+
+def _modello_cpu_registro() -> str | None:
+    """ProcessorNameString dal registro Windows (sola lettura), o None."""
+
+    if winreg is None:
+        return None
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _CHIAVE_REGISTRO_CPU) as chiave:
+            valore, _tipo = winreg.QueryValueEx(chiave, _VALORE_REGISTRO_CPU)
+    except OSError:
+        return None
+
+    if not isinstance(valore, str):
+        return None
+
+    return valore.strip() or None
+
+
+def _modello_cpu() -> str | None:
+    modello = _modello_cpu_registro()
+    if modello is not None:
+        return modello
+
+    fallback = platform.processor()
+    if not isinstance(fallback, str):
+        return None
+
+    return fallback.strip() or None
+
+
+def _core_fisici() -> int | None:
+    if psutil is None:
+        return None
+    return _intero_positivo(psutil.cpu_count(logical=False))
+
+
+def _processori_logici() -> int | None:
+    if psutil is None:
+        return None
+    return _intero_positivo(psutil.cpu_count(logical=True))
+
+
+def _uso_cpu() -> int | None:
+    if psutil is None:
+        return None
+    return _percentuale_intera(psutil.cpu_percent(interval=CPU_USAGE_INTERVAL_SECONDS))
+
+
+def _info_cpu() -> dict:
+    """Ogni metrica CPU è raccolta separatamente: un errore ne azzera solo una."""
+
+    return {
+        "model": _raccogli(_modello_cpu),
+        "physical_cores": _raccogli(_core_fisici),
+        "logical_processors": _raccogli(_processori_logici),
+        "usage_percent": _raccogli(_uso_cpu),
+    }
+
+
+def _info_memoria() -> dict:
+    """RAM da un'unica virtual_memory(): se fallisce, tutti i campi None."""
+
+    memoria = {
+        "total_bytes": None,
+        "available_bytes": None,
+        "used_bytes": None,
+        "usage_percent": None,
+    }
+
+    if psutil is None:
+        return memoria
+
+    try:
+        dati = psutil.virtual_memory()
+        memoria["total_bytes"] = _intero_non_negativo(getattr(dati, "total", None))
+        memoria["available_bytes"] = _intero_non_negativo(getattr(dati, "available", None))
+        memoria["used_bytes"] = _intero_non_negativo(getattr(dati, "used", None))
+        memoria["usage_percent"] = _percentuale(getattr(dati, "percent", None))
+    except Exception:
+        return {campo: None for campo in memoria}
+
+    return memoria
+
+
+def _numero_finito(valore) -> bool:
+    return (
+        not isinstance(valore, bool)
+        and isinstance(valore, (int, float))
+        and math.isfinite(valore)
+    )
+
+
+def _uptime_secondi() -> int | None:
+    """Secondi interi dall'avvio; None (mai 0) se boot_time/orologio sono anomali."""
+
+    if psutil is None:
+        return None
+
+    avvio = psutil.boot_time()
+    adesso = time.time()
+
+    if not _numero_finito(avvio) or not _numero_finito(adesso):
+        return None
+
+    delta = adesso - avvio
+    if not math.isfinite(delta) or delta < 0:
+        return None
+
+    return int(delta)
+
+
+def _scomposizione_uptime(secondi: int | None) -> dict:
+    """Giorni/ore/minuti calcolati da Python sullo stesso uptime_seconds normalizzato."""
+
+    if secondi is None:
+        return {"days": None, "hours": None, "minutes": None}
+
+    resto = secondi % 86400
+    return {
+        "days": secondi // 86400,
+        "hours": resto // 3600,
+        "minutes": (resto % 3600) // 60,
+    }
+
+
 def get_system_info(argomenti: dict, contesto) -> dict:
     """
     Handler del tool get_system_info.
 
-    Legge informazioni di sistema reali usando solo platform/os della
-    standard library. Non richiede parametri e non usa alcuno stato
-    esterno: argomenti e contesto vengono ignorati esplicitamente,
-    nessun side effect. cpu_count=None e processor="" sono esiti validi
-    della piattaforma (non errori) e vengono restituiti cosi' come sono.
+    Snapshot in sola lettura di sistema operativo, CPU, RAM e uptime:
+    valori raw (byte, secondi, percentuali), nessuna conversione in
+    unità leggibili; l'uptime è anche scomposto da Python in
+    giorni/ore/minuti interi, perché il modello sbaglia la divisione
+    dei secondi. Ogni metrica CPU, la memoria e l'uptime falliscono
+    in modo indipendente diventando None, senza perdere il resto dello
+    snapshot. Solo un errore imprevisto fuori dai collector (es. nei
+    campi del sistema operativo) produce tool_error, con messaggio fisso.
+    Argomenti e contesto vengono ignorati; nessun side effect. Blocca
+    per circa CPU_USAGE_INTERVAL_SECONDS per misurare l'uso CPU.
     """
 
     try:
@@ -110,9 +304,11 @@ def get_system_info(argomenti: dict, contesto) -> dict:
             "os_release": platform.release(),
             "machine": platform.machine(),
             "python_version": platform.python_version(),
-            "cpu_count": os.cpu_count(),
-            "processor": platform.processor(),
+            "cpu": _info_cpu(),
+            "memory": _info_memoria(),
+            "uptime_seconds": _raccogli(_uptime_secondi),
         }
+        data["uptime_breakdown"] = _scomposizione_uptime(data["uptime_seconds"])
     except Exception:
         # Messaggio fisso: il testo dell'eccezione potrebbe contenere
         # path o dettagli OS e non deve mai arrivare in role="tool".
@@ -312,8 +508,34 @@ def list_processes(argomenti: dict, contesto) -> dict:
     }
 
 
+_NON_DISPONIBILE = "non disponibile"
+
+
+def _testo_o_nd(valore) -> str:
+    return str(valore) if valore is not None and valore != "" else _NON_DISPONIBILE
+
+
+def _percentuale_o_nd(valore) -> str:
+    if isinstance(valore, int):
+        return f"{valore}%"
+    return f"{valore:.1f}%" if isinstance(valore, float) else _NON_DISPONIBILE
+
+
+def _bytes_o_nd(valore) -> str:
+    return _formatta_bytes(valore) if isinstance(valore, int) else _NON_DISPONIBILE
+
+
+def _formatta_durata(secondi: int) -> str:
+    """Durata leggibile per il solo testo del fallback (il dato resta in secondi)."""
+
+    giorni, resto = divmod(secondi, 86400)
+    ore, resto = divmod(resto, 3600)
+    minuti = resto // 60
+    return f"{giorni} g, {ore} h, {minuti} min"
+
+
 def _fallback_get_system_info(risultato_tool: dict) -> str:
-    """Fallback deterministico dedicato a get_system_info (comportamento invariato)."""
+    """Fallback deterministico dedicato a get_system_info."""
 
     if risultato_tool.get("status") != "success":
         return (
@@ -322,18 +544,26 @@ def _fallback_get_system_info(risultato_tool: dict) -> str:
         )
 
     data = risultato_tool.get("data", {})
+    cpu = data.get("cpu") if isinstance(data.get("cpu"), dict) else {}
+    memoria = data.get("memory") if isinstance(data.get("memory"), dict) else {}
 
-    cpu_count = data.get("cpu_count")
-    cpu_testo = str(cpu_count) if cpu_count is not None else "non disponibile"
-
-    processor = data.get("processor")
-    processor_testo = processor if processor else "non disponibile"
+    uptime = data.get("uptime_seconds")
+    uptime_testo = (
+        _formatta_durata(uptime) if isinstance(uptime, int) else _NON_DISPONIBILE
+    )
 
     return (
         f"Sistema operativo: {data.get('os_name')} {data.get('os_release')}\n"
         f"Architettura: {data.get('machine')}\n"
-        f"CPU logiche: {cpu_testo}\n"
-        f"Processore: {processor_testo}\n"
+        f"Processore: {_testo_o_nd(cpu.get('model'))}\n"
+        f"Core fisici: {_testo_o_nd(cpu.get('physical_cores'))}\n"
+        f"Processori logici (thread): {_testo_o_nd(cpu.get('logical_processors'))}\n"
+        f"Uso CPU: {_percentuale_o_nd(cpu.get('usage_percent'))}\n"
+        f"RAM totale: {_bytes_o_nd(memoria.get('total_bytes'))}\n"
+        f"RAM disponibile: {_bytes_o_nd(memoria.get('available_bytes'))}\n"
+        f"RAM in uso: {_bytes_o_nd(memoria.get('used_bytes'))} "
+        f"({_percentuale_o_nd(memoria.get('usage_percent'))})\n"
+        f"Acceso da: {uptime_testo}\n"
         f"Python: {data.get('python_version')}"
     )
 

@@ -12,6 +12,11 @@ personali, e il fallback deterministico del dominio (router per
 Copre anche la pipeline post-tool generica (modules/tool_response.py,
 invariata) applicata a risultati "system" reali di entrambi i tool.
 
+0.7.2a: get_system_info (snapshot CPU/RAM/uptime) viene testato con
+psutil, winreg, platform.processor e time finti, quindi senza l'attesa
+reale di cpu_percent; resta un solo smoke reale sulla macchina di test,
+senza valori hardware hardcodati.
+
 Nessun file in data/ viene mai letto o scritto. Nessuna chiamata a
 Ollama: esegui_risposta_finale viene sempre sostituita con un doppio
 di test.
@@ -20,6 +25,7 @@ Esecuzione:
     python -m unittest discover -s tests -v
 """
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -46,8 +52,30 @@ CAMPI_ATTESI_SYSTEM_INFO = {
     "os_release",
     "machine",
     "python_version",
-    "cpu_count",
-    "processor",
+    "cpu",
+    "memory",
+    "uptime_seconds",
+    "uptime_breakdown",
+}
+
+CAMPI_ATTESI_UPTIME_BREAKDOWN = {
+    "days",
+    "hours",
+    "minutes",
+}
+
+CAMPI_ATTESI_CPU = {
+    "model",
+    "physical_cores",
+    "logical_processors",
+    "usage_percent",
+}
+
+CAMPI_ATTESI_MEMORIA = {
+    "total_bytes",
+    "available_bytes",
+    "used_bytes",
+    "usage_percent",
 }
 
 CAMPI_ATTESI_DISK_USAGE = {
@@ -215,14 +243,40 @@ class TestRegistrazioneSistema(unittest.TestCase):
         self.assertIsNone(risultato["domain"])
 
 
+def _tutte_le_chiavi(valore) -> set:
+    """Chiavi di un dict e di tutti i dict annidati, in minuscolo."""
+
+    chiavi = set()
+    if isinstance(valore, dict):
+        for chiave, interno in valore.items():
+            chiavi.add(str(chiave).lower())
+            chiavi |= _tutte_le_chiavi(interno)
+    return chiavi
+
+
+def _tutte_le_stringhe(valore) -> list:
+    """Valori stringa di un dict e di tutti i dict annidati."""
+
+    if isinstance(valore, str):
+        return [valore]
+    if isinstance(valore, dict):
+        stringhe = []
+        for interno in valore.values():
+            stringhe.extend(_tutte_le_stringhe(interno))
+        return stringhe
+    return []
+
+
 # =====================================================================
-# Handler reale (nessun mock: valori veri della macchina di test)
+# Smoke reale get_system_info (unica chiamata reale: attende ~0.1 s per
+# cpu_percent). Nessun valore hardware hardcodato: la suite è portabile.
 # =====================================================================
 
 class TestHandlerGetSystemInfo(unittest.TestCase):
 
-    def setUp(self):
-        self.risultato = get_system_info({}, None)
+    @classmethod
+    def setUpClass(cls):
+        cls.risultato = get_system_info({}, None)
 
     def test_successo(self):
         self.assertTrue(self.risultato["ok"])
@@ -234,26 +288,67 @@ class TestHandlerGetSystemInfo(unittest.TestCase):
     def test_tutti_i_campi_presenti(self):
         data = self.risultato["data"]
         self.assertEqual(set(data.keys()), CAMPI_ATTESI_SYSTEM_INFO)
+        self.assertEqual(set(data["cpu"].keys()), CAMPI_ATTESI_CPU)
+        self.assertEqual(set(data["memory"].keys()), CAMPI_ATTESI_MEMORIA)
+        self.assertEqual(
+            set(data["uptime_breakdown"].keys()),
+            CAMPI_ATTESI_UPTIME_BREAKDOWN,
+        )
 
     def test_tipi_corretti(self):
         data = self.risultato["data"]
 
-        for campo in ("os_name", "os_release", "machine", "python_version", "processor"):
+        for campo in ("os_name", "os_release", "machine", "python_version"):
             self.assertIsInstance(data[campo], str, msg=campo)
 
-        self.assertTrue(data["cpu_count"] is None or isinstance(data["cpu_count"], int))
+        cpu = data["cpu"]
+        self.assertTrue(cpu["model"] is None or isinstance(cpu["model"], str))
+        for campo in ("physical_cores", "logical_processors"):
+            valore = cpu[campo]
+            self.assertTrue(
+                valore is None or (type(valore) is int and valore > 0),
+                msg=campo,
+            )
+
+        uso_cpu = cpu["usage_percent"]
+        self.assertTrue(
+            uso_cpu is None or (type(uso_cpu) is int and 0 <= uso_cpu <= 100)
+        )
+
+        uso_memoria = data["memory"]["usage_percent"]
+        self.assertTrue(
+            uso_memoria is None
+            or (type(uso_memoria) is float and 0 <= uso_memoria <= 100)
+        )
+
+        for campo in ("total_bytes", "available_bytes", "used_bytes"):
+            valore = data["memory"][campo]
+            self.assertTrue(
+                valore is None or (type(valore) is int and valore >= 0),
+                msg=campo,
+            )
+
+        uptime = data["uptime_seconds"]
+        self.assertTrue(uptime is None or (type(uptime) is int and uptime >= 0))
+
+        for campo, valore in data["uptime_breakdown"].items():
+            if uptime is None:
+                self.assertIsNone(valore, msg=campo)
+            else:
+                self.assertTrue(type(valore) is int and valore >= 0, msg=campo)
+
+    def test_json_serializzabile(self):
+        json.dumps(self.risultato, allow_nan=False)
 
     def test_nessun_dato_personale(self):
         data = self.risultato["data"]
 
-        chiavi_presenti = {chiave.lower() for chiave in data.keys()}
-        self.assertEqual(chiavi_presenti & CHIAVI_VIETATE, set())
+        self.assertEqual(_tutte_le_chiavi(data) & CHIAVI_VIETATE, set())
 
         # Anche i valori non devono contenere la home directory reale.
         home = str(Path.home())
-        for valore in data.values():
-            if isinstance(valore, str):
-                self.assertNotIn(home, valore)
+        for valore in _tutte_le_stringhe(data):
+            self.assertNotIn(home, valore)
 
     def test_sorgente_senza_path_hardcoded_personali(self):
         sorgente = (BASE_DIR / "modules" / "system_tools.py").read_text(
@@ -264,60 +359,954 @@ class TestHandlerGetSystemInfo(unittest.TestCase):
         self.assertNotIn(str(Path.home()), sorgente)
 
 
-class TestHandlerCasiLimite(unittest.TestCase):
-    """processor="" e cpu_count=None sono esiti validi, non errori."""
+# =====================================================================
+# 0.7.2a - get_system_info con doppi di psutil/winreg/processor/time
+# =====================================================================
 
-    def test_processor_vuoto_consentito(self):
-        originale = system_tools.platform.processor
-        system_tools.platform.processor = lambda: ""
-        try:
-            risultato = get_system_info({}, None)
-        finally:
-            system_tools.platform.processor = originale
+_PREDEFINITO = object()
+
+_AVVIO_FINTO = 1_000_000.0
+_ADESSO_FINTO = _AVVIO_FINTO + 86_400.0
+_MODELLO_REGISTRO_FINTO = "Example CPU 8-Core Processor            "
+_PROCESSOR_FALLBACK_FINTO = "Fallback CPU Family 1, GenuineExample"
+
+
+def _valore_o_errore(valore):
+    if isinstance(valore, BaseException):
+        raise valore
+    return valore
+
+
+def _memoria_finta(**campi):
+    base = {
+        "total": 34_359_738_368,
+        "available": 12_884_901_888,
+        "used": 21_474_836_480,
+        "percent": 62.5,
+    }
+    base.update(campi)
+    return SimpleNamespace(**base)
+
+
+class _PsutilSystemInfoFinto:
+    """Doppio di psutil per get_system_info: valori o eccezioni, chiamate registrate."""
+
+    def __init__(
+        self,
+        fisici=12,
+        logici=24,
+        uso=37.5,
+        memoria=_PREDEFINITO,
+        avvio=_AVVIO_FINTO,
+    ):
+        self._fisici = fisici
+        self._logici = logici
+        self._uso = uso
+        self._memoria = _memoria_finta() if memoria is _PREDEFINITO else memoria
+        self._avvio = avvio
+        self.chiamate_cpu_count = []
+        self.intervalli_cpu_percent = []
+        self.chiamate_boot_time = 0
+
+    def cpu_count(self, logical=True):
+        self.chiamate_cpu_count.append(logical)
+        return _valore_o_errore(self._logici if logical else self._fisici)
+
+    def cpu_percent(self, interval=None):
+        self.intervalli_cpu_percent.append(interval)
+        return _valore_o_errore(self._uso)
+
+    def virtual_memory(self):
+        return _valore_o_errore(self._memoria)
+
+    def boot_time(self):
+        self.chiamate_boot_time += 1
+        return _valore_o_errore(self._avvio)
+
+
+class _ChiaveRegistroFinta:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *eccezione):
+        return False
+
+
+class _WinregFinto:
+    """Doppio di winreg: registra chiave aperta e valore letto."""
+
+    HKEY_LOCAL_MACHINE = "HKLM-finto"
+
+    def __init__(
+        self,
+        valore=_MODELLO_REGISTRO_FINTO,
+        errore_apertura=None,
+        errore_lettura=None,
+    ):
+        self._valore = valore
+        self._errore_apertura = errore_apertura
+        self._errore_lettura = errore_lettura
+        self.aperture = []
+        self.letture = []
+
+    def OpenKey(self, radice, sottochiave, *args, **kwargs):
+        self.aperture.append((radice, sottochiave))
+        if self._errore_apertura is not None:
+            raise self._errore_apertura
+        return _ChiaveRegistroFinta()
+
+    def QueryValueEx(self, chiave, nome):
+        self.letture.append(nome)
+        if self._errore_lettura is not None:
+            raise self._errore_lettura
+        return self._valore, 1
+
+
+def _esegui_get_system_info(
+    psutil_finto=_PREDEFINITO,
+    winreg_finto=_PREDEFINITO,
+    processor=_PROCESSOR_FALLBACK_FINTO,
+    adesso=_ADESSO_FINTO,
+):
+    """
+    Esegue get_system_info con doppi di psutil, winreg, platform.processor
+    e time (nessuna attesa reale). winreg_finto=None simula un sistema
+    senza winreg; processor/adesso possono essere eccezioni da sollevare;
+    adesso può anche essere un callable (es. un orologio che conta le chiamate).
+    """
+
+    if psutil_finto is _PREDEFINITO:
+        psutil_finto = _PsutilSystemInfoFinto()
+    if winreg_finto is _PREDEFINITO:
+        winreg_finto = _WinregFinto()
+
+    originali = (
+        system_tools.psutil,
+        system_tools.winreg,
+        system_tools.platform.processor,
+        system_tools.time,
+    )
+    system_tools.psutil = psutil_finto
+    system_tools.winreg = winreg_finto
+    system_tools.platform.processor = lambda: _valore_o_errore(processor)
+    orologio = adesso if callable(adesso) else (lambda: _valore_o_errore(adesso))
+    system_tools.time = SimpleNamespace(time=orologio)
+    try:
+        return system_tools.get_system_info({}, None)
+    finally:
+        (
+            system_tools.psutil,
+            system_tools.winreg,
+            system_tools.platform.processor,
+            system_tools.time,
+        ) = originali
+
+
+class TestModelloCpu(unittest.TestCase):
+
+    def _modello(self, **kwargs):
+        risultato = _esegui_get_system_info(**kwargs)
+        self.assertTrue(risultato["ok"])
+        return risultato["data"]["cpu"]["model"]
+
+    def test_registro_con_spazi_finali_viene_ripulito(self):
+        winreg_finto = _WinregFinto()
+        modello = self._modello(winreg_finto=winreg_finto)
+
+        self.assertEqual(modello, "Example CPU 8-Core Processor")
+        self.assertEqual(
+            winreg_finto.aperture,
+            [("HKLM-finto", r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")],
+        )
+        self.assertEqual(winreg_finto.letture, ["ProcessorNameString"])
+
+    def test_registro_ha_priorita_sul_fallback(self):
+        modello = self._modello(processor="non deve essere usato")
+        self.assertEqual(modello, "Example CPU 8-Core Processor")
+
+    def test_chiave_mancante_usa_platform_processor(self):
+        winreg_finto = _WinregFinto(errore_apertura=FileNotFoundError(2, "x"))
+        self.assertEqual(
+            self._modello(winreg_finto=winreg_finto),
+            _PROCESSOR_FALLBACK_FINTO,
+        )
+
+    def test_valore_mancante_usa_platform_processor(self):
+        winreg_finto = _WinregFinto(errore_lettura=FileNotFoundError(2, "x"))
+        self.assertEqual(
+            self._modello(winreg_finto=winreg_finto),
+            _PROCESSOR_FALLBACK_FINTO,
+        )
+
+    def test_accesso_negato_usa_platform_processor(self):
+        winreg_finto = _WinregFinto(errore_apertura=PermissionError(5, "negato"))
+        self.assertEqual(
+            self._modello(winreg_finto=winreg_finto),
+            _PROCESSOR_FALLBACK_FINTO,
+        )
+
+    def test_registro_vuoto_usa_platform_processor(self):
+        winreg_finto = _WinregFinto(valore="   ")
+        self.assertEqual(
+            self._modello(winreg_finto=winreg_finto),
+            _PROCESSOR_FALLBACK_FINTO,
+        )
+
+    def test_registro_non_stringa_usa_platform_processor(self):
+        winreg_finto = _WinregFinto(valore=12345)
+        self.assertEqual(
+            self._modello(winreg_finto=winreg_finto),
+            _PROCESSOR_FALLBACK_FINTO,
+        )
+
+    def test_senza_winreg_usa_platform_processor_ripulito(self):
+        modello = self._modello(winreg_finto=None, processor="  Generic CPU  ")
+        self.assertEqual(modello, "Generic CPU")
+
+    def test_fallback_vuoto_produce_none(self):
+        modello = self._modello(
+            winreg_finto=_WinregFinto(valore=""),
+            processor="   ",
+        )
+        self.assertIsNone(modello)
+
+    def test_fallback_non_stringa_produce_none(self):
+        self.assertIsNone(self._modello(winreg_finto=None, processor=None))
+
+    def test_fallback_in_errore_produce_none(self):
+        modello = self._modello(
+            winreg_finto=None,
+            processor=RuntimeError("uname fallito"),
+        )
+        self.assertIsNone(modello)
+
+    def test_errore_registro_non_compare_nel_risultato(self):
+        winreg_finto = _WinregFinto(
+            errore_apertura=OSError(5, "Accesso negato", r"C:\Users\Secret\reg"),
+        )
+        risultato = _esegui_get_system_info(winreg_finto=winreg_finto)
+        serializzato = json.dumps(risultato, ensure_ascii=False)
+
+        self.assertNotIn("Secret", serializzato)
+        self.assertNotIn("Accesso negato", serializzato)
+
+
+class TestCoreCpu(unittest.TestCase):
+
+    def _cpu(self, **kwargs):
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(**kwargs)
+        )
+        self.assertTrue(risultato["ok"])
+        return risultato["data"]["cpu"]
+
+    def test_fisici_e_logici_distinti(self):
+        cpu = self._cpu(fisici=12, logici=24)
+        self.assertEqual(cpu["physical_cores"], 12)
+        self.assertEqual(cpu["logical_processors"], 24)
+
+    def test_chiamate_esplicite_logical_false_e_true(self):
+        finto = _PsutilSystemInfoFinto()
+        _esegui_get_system_info(psutil_finto=finto)
+        self.assertEqual(sorted(finto.chiamate_cpu_count), [False, True])
+
+    def test_fisici_none(self):
+        cpu = self._cpu(fisici=None)
+        self.assertIsNone(cpu["physical_cores"])
+        self.assertEqual(cpu["logical_processors"], 24)
+
+    def test_logici_none(self):
+        cpu = self._cpu(logici=None)
+        self.assertIsNone(cpu["logical_processors"])
+        self.assertEqual(cpu["physical_cores"], 12)
+
+    def test_zero_non_valido(self):
+        cpu = self._cpu(fisici=0, logici=0)
+        self.assertIsNone(cpu["physical_cores"])
+        self.assertIsNone(cpu["logical_processors"])
+
+    def test_negativo_non_valido(self):
+        cpu = self._cpu(fisici=-4, logici=-8)
+        self.assertIsNone(cpu["physical_cores"])
+        self.assertIsNone(cpu["logical_processors"])
+
+    def test_bool_non_valido(self):
+        cpu = self._cpu(fisici=True, logici=True)
+        self.assertIsNone(cpu["physical_cores"])
+        self.assertIsNone(cpu["logical_processors"])
+
+    def test_float_e_stringa_non_validi(self):
+        cpu = self._cpu(fisici=12.0, logici="24")
+        self.assertIsNone(cpu["physical_cores"])
+        self.assertIsNone(cpu["logical_processors"])
+
+    def test_errore_fisici_non_azzera_logici(self):
+        cpu = self._cpu(fisici=RuntimeError("fisici"))
+        self.assertIsNone(cpu["physical_cores"])
+        self.assertEqual(cpu["logical_processors"], 24)
+
+    def test_errore_logici_non_azzera_fisici(self):
+        cpu = self._cpu(logici=RuntimeError("logici"))
+        self.assertIsNone(cpu["logical_processors"])
+        self.assertEqual(cpu["physical_cores"], 12)
+
+
+class TestUsoCpu(unittest.TestCase):
+
+    def _uso(self, valore):
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(uso=valore)
+        )
+        self.assertTrue(risultato["ok"])
+        return risultato["data"]["cpu"]["usage_percent"]
+
+    def test_arrotondamento_intero_mezzo_per_eccesso(self):
+        casi = {
+            0.0: 0,
+            0.3: 0,
+            0.5: 1,
+            0.6: 1,
+            0.9: 1,
+            1.4: 1,
+            2.5: 3,
+            37.5: 38,
+            99.2: 99,
+            100: 100,
+        }
+        for grezzo, atteso in casi.items():
+            uso = self._uso(grezzo)
+            self.assertEqual(uso, atteso, msg=grezzo)
+            self.assertIs(type(uso), int, msg=grezzo)
+
+    def test_intero_valido_invariato(self):
+        uso = self._uso(42)
+        self.assertEqual(uso, 42)
+        self.assertIs(type(uso), int)
+
+    def test_bool_non_valido(self):
+        self.assertIsNone(self._uso(True))
+        self.assertIsNone(self._uso(False))
+
+    def test_negativo_non_valido(self):
+        self.assertIsNone(self._uso(-0.1))
+
+    def test_oltre_cento_non_valido(self):
+        self.assertIsNone(self._uso(100.1))
+
+    def test_nan_non_valido(self):
+        self.assertIsNone(self._uso(float("nan")))
+
+    def test_infinito_positivo_non_valido(self):
+        self.assertIsNone(self._uso(float("inf")))
+
+    def test_infinito_negativo_non_valido(self):
+        self.assertIsNone(self._uso(float("-inf")))
+
+    def test_intero_enorme_non_valido(self):
+        self.assertIsNone(self._uso(10 ** 400))
+
+    def test_stringa_non_valida(self):
+        self.assertIsNone(self._uso("50"))
+
+    def test_eccezione_produce_none(self):
+        self.assertIsNone(self._uso(RuntimeError("cpu_percent")))
+
+    def test_intervallo_richiesto_zero_virgola_uno(self):
+        finto = _PsutilSystemInfoFinto()
+        _esegui_get_system_info(psutil_finto=finto)
+
+        self.assertEqual(system_tools.CPU_USAGE_INTERVAL_SECONDS, 0.1)
+        self.assertEqual(finto.intervalli_cpu_percent, [0.1])
+
+    def test_nessuna_sleep_aggiuntiva_nel_modulo(self):
+        sorgente = (BASE_DIR / "modules" / "system_tools.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("sleep", sorgente)
+
+
+class TestMemoria(unittest.TestCase):
+
+    def _memoria(self, memoria):
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(memoria=memoria)
+        )
+        self.assertTrue(risultato["ok"])
+        return risultato["data"]["memory"]
+
+    def test_valori_simulati_raw(self):
+        memoria = self._memoria(_memoria_finta())
+
+        self.assertEqual(
+            memoria,
+            {
+                "total_bytes": 34_359_738_368,
+                "available_bytes": 12_884_901_888,
+                "used_bytes": 21_474_836_480,
+                "usage_percent": 62.5,
+            },
+        )
+        for campo in ("total_bytes", "available_bytes", "used_bytes"):
+            self.assertIs(type(memoria[campo]), int, msg=campo)
+        self.assertIs(type(memoria["usage_percent"]), float)
+
+    def test_zeri_ammessi(self):
+        memoria = self._memoria(
+            _memoria_finta(total=0, available=0, used=0, percent=0)
+        )
+        self.assertEqual(
+            memoria,
+            {
+                "total_bytes": 0,
+                "available_bytes": 0,
+                "used_bytes": 0,
+                "usage_percent": 0.0,
+            },
+        )
+
+    def test_percentuale_cento(self):
+        self.assertEqual(
+            self._memoria(_memoria_finta(percent=100))["usage_percent"],
+            100.0,
+        )
+
+    def test_bool_non_validi(self):
+        memoria = self._memoria(
+            _memoria_finta(total=True, available=False, used=True, percent=True)
+        )
+        self.assertEqual(set(memoria.values()), {None})
+
+    def test_byte_negativi_non_validi(self):
+        memoria = self._memoria(_memoria_finta(total=-1, available=-2, used=-3))
+        self.assertIsNone(memoria["total_bytes"])
+        self.assertIsNone(memoria["available_bytes"])
+        self.assertIsNone(memoria["used_bytes"])
+        self.assertEqual(memoria["usage_percent"], 62.5)
+
+    def test_byte_float_non_validi(self):
+        memoria = self._memoria(_memoria_finta(total=1024.0))
+        self.assertIsNone(memoria["total_bytes"])
+        self.assertEqual(memoria["used_bytes"], 21_474_836_480)
+
+    def test_percentuale_negativa_non_valida(self):
+        self.assertIsNone(
+            self._memoria(_memoria_finta(percent=-5))["usage_percent"]
+        )
+
+    def test_percentuale_oltre_cento_non_valida(self):
+        self.assertIsNone(
+            self._memoria(_memoria_finta(percent=150))["usage_percent"]
+        )
+
+    def test_percentuale_nan_e_infinito_non_valide(self):
+        for valore in (float("nan"), float("inf"), float("-inf")):
+            self.assertIsNone(
+                self._memoria(_memoria_finta(percent=valore))["usage_percent"],
+                msg=repr(valore),
+            )
+
+    def test_campo_mancante_solo_quel_campo_none(self):
+        memoria = self._memoria(
+            SimpleNamespace(total=1024, available=512, percent=50.0)
+        )
+        self.assertIsNone(memoria["used_bytes"])
+        self.assertEqual(memoria["total_bytes"], 1024)
+        self.assertEqual(memoria["available_bytes"], 512)
+        self.assertEqual(memoria["usage_percent"], 50.0)
+
+    def test_eccezione_virtual_memory_tutti_none(self):
+        memoria = self._memoria(OSError(5, "Accesso negato", r"C:\Users\Secret"))
+        self.assertEqual(
+            memoria,
+            {
+                "total_bytes": None,
+                "available_bytes": None,
+                "used_bytes": None,
+                "usage_percent": None,
+            },
+        )
+
+    def test_nessuna_unita_umanizzata(self):
+        memoria = self._memoria(_memoria_finta())
+        for valore in memoria.values():
+            self.assertNotIsInstance(valore, str)
+        serializzato = json.dumps(memoria)
+        for unita in ("GB", "MB", "GiB", "MiB", "KB"):
+            self.assertNotIn(unita, serializzato)
+
+
+class TestUptime(unittest.TestCase):
+
+    def _uptime(self, avvio=_AVVIO_FINTO, adesso=_ADESSO_FINTO):
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(avvio=avvio),
+            adesso=adesso,
+        )
+        self.assertTrue(risultato["ok"])
+        return risultato["data"]["uptime_seconds"]
+
+    def test_normale(self):
+        uptime = self._uptime()
+        self.assertEqual(uptime, 86_400)
+        self.assertIs(type(uptime), int)
+
+    def test_frazionario_troncato_a_intero(self):
+        uptime = self._uptime(adesso=_AVVIO_FINTO + 125.9)
+        self.assertEqual(uptime, 125)
+        self.assertIs(type(uptime), int)
+
+    def test_zero_ammesso(self):
+        self.assertEqual(self._uptime(adesso=_AVVIO_FINTO), 0)
+
+    def test_boot_time_futuro_produce_none(self):
+        self.assertIsNone(self._uptime(avvio=_ADESSO_FINTO + 10))
+
+    def test_boot_time_nan_e_infinito(self):
+        for valore in (float("nan"), float("inf"), float("-inf")):
+            self.assertIsNone(self._uptime(avvio=valore), msg=repr(valore))
+
+    def test_time_nan_e_infinito(self):
+        for valore in (float("nan"), float("inf"), float("-inf")):
+            self.assertIsNone(self._uptime(adesso=valore), msg=repr(valore))
+
+    def test_boot_time_bool_non_valido(self):
+        self.assertIsNone(self._uptime(avvio=True))
+
+    def test_errore_boot_time(self):
+        self.assertIsNone(self._uptime(avvio=OSError("boot_time")))
+
+    def test_errore_time(self):
+        self.assertIsNone(self._uptime(adesso=RuntimeError("clock")))
+
+    def test_mai_negativo(self):
+        scenari = [
+            (_AVVIO_FINTO, _ADESSO_FINTO),
+            (_ADESSO_FINTO, _AVVIO_FINTO),
+            (_AVVIO_FINTO, _AVVIO_FINTO - 0.5),
+            (0, 0),
+            (0, 1e12),
+        ]
+        for avvio, adesso in scenari:
+            uptime = self._uptime(avvio=avvio, adesso=adesso)
+            self.assertTrue(
+                uptime is None or (type(uptime) is int and uptime >= 0),
+                msg=(avvio, adesso),
+            )
+
+
+class _OrologioContato:
+    """time.time finto che conta le chiamate."""
+
+    def __init__(self, valore):
+        self.valore = valore
+        self.chiamate = 0
+
+    def __call__(self):
+        self.chiamate += 1
+        return self.valore
+
+
+class TestUptimeBreakdown(unittest.TestCase):
+
+    def _data(self, avvio=_AVVIO_FINTO, adesso=_ADESSO_FINTO):
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(avvio=avvio),
+            adesso=adesso,
+        )
+        self.assertTrue(risultato["ok"])
+        return risultato["data"]
+
+    def test_normale_un_giorno(self):
+        self.assertEqual(
+            self._data()["uptime_breakdown"],
+            {"days": 1, "hours": 0, "minutes": 0},
+        )
+
+    def test_zero_secondi(self):
+        data = self._data(adesso=_AVVIO_FINTO)
+        self.assertEqual(data["uptime_seconds"], 0)
+        self.assertEqual(
+            data["uptime_breakdown"],
+            {"days": 0, "hours": 0, "minutes": 0},
+        )
+
+    def test_giorni_ore_minuti_corretti(self):
+        secondi = 5 * 86_400 + 2 * 3600 + 16 * 60 + 48
+        data = self._data(adesso=_AVVIO_FINTO + secondi)
+
+        self.assertEqual(data["uptime_seconds"], secondi)
+        self.assertEqual(
+            data["uptime_breakdown"],
+            {"days": 5, "hours": 2, "minutes": 16},
+        )
+
+    def test_limiti_di_ora_e_giorno(self):
+        casi = {
+            59: {"days": 0, "hours": 0, "minutes": 0},
+            3599: {"days": 0, "hours": 0, "minutes": 59},
+            3600: {"days": 0, "hours": 1, "minutes": 0},
+            86_399: {"days": 0, "hours": 23, "minutes": 59},
+            86_400: {"days": 1, "hours": 0, "minutes": 0},
+        }
+        for secondi, atteso in casi.items():
+            data = self._data(adesso=_AVVIO_FINTO + secondi)
+            self.assertEqual(data["uptime_breakdown"], atteso, msg=secondi)
+
+    def test_frazionario_usa_i_secondi_interi(self):
+        data = self._data(adesso=_AVVIO_FINTO + 3599.9)
+        self.assertEqual(data["uptime_seconds"], 3599)
+        self.assertEqual(
+            data["uptime_breakdown"],
+            {"days": 0, "hours": 0, "minutes": 59},
+        )
+
+    def test_tipi_interi_non_negativi(self):
+        for valore in self._data()["uptime_breakdown"].values():
+            self.assertIs(type(valore), int)
+            self.assertGreaterEqual(valore, 0)
+
+    def test_uptime_none_tutti_none(self):
+        for avvio in (OSError("boot_time"), _ADESSO_FINTO + 10, float("nan")):
+            data = self._data(avvio=avvio)
+            self.assertIsNone(data["uptime_seconds"], msg=repr(avvio))
+            self.assertEqual(
+                data["uptime_breakdown"],
+                {"days": None, "hours": None, "minutes": None},
+                msg=repr(avvio),
+            )
+
+    def test_derivato_dallo_stesso_uptime_seconds(self):
+        psutil_finto = _PsutilSystemInfoFinto()
+        orologio = _OrologioContato(_AVVIO_FINTO + 7 * 86_400 + 13 * 3600 + 5 * 60 + 30)
+        risultato = _esegui_get_system_info(psutil_finto=psutil_finto, adesso=orologio)
+        data = risultato["data"]
+
+        self.assertEqual(psutil_finto.chiamate_boot_time, 1)
+        self.assertEqual(orologio.chiamate, 1)
+
+        scomposto = data["uptime_breakdown"]
+        ricomposto = (
+            scomposto["days"] * 86_400
+            + scomposto["hours"] * 3600
+            + scomposto["minutes"] * 60
+        )
+        self.assertEqual(ricomposto, data["uptime_seconds"] // 60 * 60)
+        self.assertEqual(scomposto, {"days": 7, "hours": 13, "minutes": 5})
+
+
+class TestPartialSuccess(unittest.TestCase):
+    """Un errore locale azzera solo la metrica interessata, mai lo snapshot."""
+
+    def test_cpu_percent_fallisce(self):
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(uso=RuntimeError("x"))
+        )
+        data = risultato["data"]
 
         self.assertTrue(risultato["ok"])
-        self.assertEqual(risultato["data"]["processor"], "")
+        self.assertEqual(
+            data["cpu"],
+            {
+                "model": "Example CPU 8-Core Processor",
+                "physical_cores": 12,
+                "logical_processors": 24,
+                "usage_percent": None,
+            },
+        )
+        self.assertEqual(data["memory"]["total_bytes"], 34_359_738_368)
+        self.assertEqual(data["uptime_seconds"], 86_400)
 
-    def test_cpu_count_none_consentito(self):
-        originale = system_tools.os.cpu_count
-        system_tools.os.cpu_count = lambda: None
-        try:
-            risultato = get_system_info({}, None)
-        finally:
-            system_tools.os.cpu_count = originale
+    def test_core_fisici_falliscono(self):
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(fisici=RuntimeError("x"))
+        )
+        cpu = risultato["data"]["cpu"]
+
+        self.assertIsNone(cpu["physical_cores"])
+        self.assertEqual(cpu["logical_processors"], 24)
+        self.assertEqual(cpu["model"], "Example CPU 8-Core Processor")
+        self.assertEqual(cpu["usage_percent"], 38)
+
+    def test_modello_fallisce(self):
+        risultato = _esegui_get_system_info(
+            winreg_finto=_WinregFinto(errore_apertura=OSError("x")),
+            processor=RuntimeError("y"),
+        )
+        cpu = risultato["data"]["cpu"]
+
+        self.assertIsNone(cpu["model"])
+        self.assertEqual(cpu["physical_cores"], 12)
+        self.assertEqual(cpu["logical_processors"], 24)
+        self.assertEqual(cpu["usage_percent"], 38)
+
+    def test_virtual_memory_fallisce(self):
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(memoria=RuntimeError("x"))
+        )
+        data = risultato["data"]
+
+        self.assertEqual(set(data["memory"].values()), {None})
+        self.assertEqual(data["cpu"]["physical_cores"], 12)
+        self.assertEqual(data["cpu"]["usage_percent"], 38)
+        self.assertEqual(data["uptime_seconds"], 86_400)
+
+    def test_boot_time_fallisce(self):
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(avvio=RuntimeError("x"))
+        )
+        data = risultato["data"]
+
+        self.assertIsNone(data["uptime_seconds"])
+        self.assertEqual(set(data["uptime_breakdown"].values()), {None})
+        self.assertEqual(data["cpu"]["logical_processors"], 24)
+        self.assertEqual(data["memory"]["used_bytes"], 21_474_836_480)
+
+    def test_tutti_i_collector_falliscono_schema_completo(self):
+        psutil_finto = _PsutilSystemInfoFinto(
+            fisici=RuntimeError("a"),
+            logici=RuntimeError("b"),
+            uso=RuntimeError("c"),
+            memoria=RuntimeError("d"),
+            avvio=RuntimeError("e"),
+        )
+        risultato = _esegui_get_system_info(
+            psutil_finto=psutil_finto,
+            winreg_finto=_WinregFinto(errore_apertura=OSError("f")),
+            processor=RuntimeError("g"),
+        )
+        data = risultato["data"]
 
         self.assertTrue(risultato["ok"])
-        self.assertIsNone(risultato["data"]["cpu_count"])
+        self.assertEqual(set(data.keys()), CAMPI_ATTESI_SYSTEM_INFO)
+        self.assertEqual(set(data["cpu"].values()), {None})
+        self.assertEqual(set(data["memory"].values()), {None})
+        self.assertIsNone(data["uptime_seconds"])
+        self.assertEqual(set(data["uptime_breakdown"].values()), {None})
+        self.assertIsInstance(data["os_name"], str)
+
+    def test_psutil_assente(self):
+        risultato = _esegui_get_system_info(psutil_finto=None)
+        data = risultato["data"]
+
+        self.assertTrue(risultato["ok"])
+        self.assertEqual(
+            data["cpu"],
+            {
+                "model": "Example CPU 8-Core Processor",
+                "physical_cores": None,
+                "logical_processors": None,
+                "usage_percent": None,
+            },
+        )
+        self.assertEqual(set(data["memory"].values()), {None})
+        self.assertIsNone(data["uptime_seconds"])
+        self.assertEqual(set(data["uptime_breakdown"].values()), {None})
+
+
+class TestContrattoOutputSystemInfo(unittest.TestCase):
+
+    def setUp(self):
+        self.risultato = _esegui_get_system_info()
+        self.data = self.risultato["data"]
+
+    def test_struttura_esatta(self):
+        self.assertEqual(
+            set(self.risultato.keys()),
+            {"ok", "operation", "status", "data"},
+        )
+        self.assertEqual(set(self.data.keys()), CAMPI_ATTESI_SYSTEM_INFO)
+        self.assertEqual(set(self.data["cpu"].keys()), CAMPI_ATTESI_CPU)
+        self.assertEqual(set(self.data["memory"].keys()), CAMPI_ATTESI_MEMORIA)
+        self.assertEqual(
+            set(self.data["uptime_breakdown"].keys()),
+            CAMPI_ATTESI_UPTIME_BREAKDOWN,
+        )
+
+    def test_campi_legacy_ambigui_assenti(self):
+        chiavi = _tutte_le_chiavi(self.data)
+        self.assertNotIn("cpu_count", chiavi)
+        self.assertNotIn("processor", chiavi)
+
+    def test_valori_attesi_con_doppi(self):
+        self.assertEqual(
+            self.data["cpu"],
+            {
+                "model": "Example CPU 8-Core Processor",
+                "physical_cores": 12,
+                "logical_processors": 24,
+                "usage_percent": 38,
+            },
+        )
+        self.assertIs(type(self.data["cpu"]["usage_percent"]), int)
+        self.assertIs(type(self.data["memory"]["usage_percent"]), float)
+        self.assertEqual(self.data["uptime_seconds"], 86_400)
+        self.assertEqual(
+            self.data["uptime_breakdown"],
+            {"days": 1, "hours": 0, "minutes": 0},
+        )
+
+    def test_serializzabile_json_senza_nan(self):
+        json.dumps(self.risultato, allow_nan=False)
+
+        con_anomalie = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(
+                uso=float("nan"),
+                memoria=_memoria_finta(percent=float("inf")),
+                avvio=float("nan"),
+            )
+        )
+        json.dumps(con_anomalie, allow_nan=False)
+
+    def test_nessuna_chiave_privacy_sensibile(self):
+        self.assertEqual(_tutte_le_chiavi(self.data) & CHIAVI_VIETATE, set())
+
+    def test_nessuna_stringa_umanizzata_per_byte_o_uptime(self):
+        self.assertNotIsInstance(self.data["uptime_seconds"], str)
+        for valore in self.data["memory"].values():
+            self.assertNotIsInstance(valore, str)
+        for valore in self.data["uptime_breakdown"].values():
+            self.assertIs(type(valore), int)
+
+        stringhe = set(_tutte_le_stringhe(self.data))
+        self.assertEqual(
+            stringhe,
+            {
+                self.data["os_name"],
+                self.data["os_release"],
+                self.data["machine"],
+                self.data["python_version"],
+                self.data["cpu"]["model"],
+            },
+        )
+
+    def test_nessuna_eccezione_raw(self):
+        segreto = r"C:\Users\Secret\dettaglio"
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(
+                fisici=OSError(13, "Permesso negato", segreto),
+                logici=RuntimeError(segreto),
+                uso=RuntimeError(segreto),
+                memoria=OSError(13, "Permesso negato", segreto),
+                avvio=OSError(13, "Permesso negato", segreto),
+            ),
+            winreg_finto=_WinregFinto(errore_apertura=OSError(5, segreto)),
+            processor=RuntimeError(segreto),
+            adesso=RuntimeError(segreto),
+        )
+        serializzato = json.dumps(risultato, ensure_ascii=False)
+
+        self.assertTrue(risultato["ok"])
+        self.assertNotIn("Secret", serializzato)
+        self.assertNotIn("Permesso negato", serializzato)
+
+    def test_input_schema_invariato(self):
+        schema = _schema_per_nome("get_system_info")
+        self.assertEqual(
+            schema["function"]["parameters"],
+            {"type": "object", "properties": {}, "required": []},
+        )
 
 
 # =====================================================================
 # Fallback deterministico del dominio system
 # =====================================================================
 
+def _risultato_system_info(cpu=None, memory=None, uptime_seconds=86_400, **os_campi):
+    data = {
+        "os_name": "Windows",
+        "os_release": "11",
+        "machine": "AMD64",
+        "python_version": "3.12.4",
+        "cpu": {
+            "model": "Example CPU 8-Core Processor",
+            "physical_cores": 12,
+            "logical_processors": 24,
+            "usage_percent": 38,
+        },
+        "memory": {
+            "total_bytes": 32 * 1024 ** 3,
+            "available_bytes": 12 * 1024 ** 3,
+            "used_bytes": 20 * 1024 ** 3,
+            "usage_percent": 62.5,
+        },
+        "uptime_seconds": uptime_seconds,
+    }
+    data.update(os_campi)
+    if cpu is not None:
+        data["cpu"].update(cpu)
+    if memory is not None:
+        data["memory"].update(memory)
+
+    return {
+        "ok": True,
+        "operation": "get_system_info",
+        "status": "success",
+        "data": data,
+    }
+
+
 class TestFallbackDeterministicoSistema(unittest.TestCase):
 
     def test_successo_leggibile(self):
-        risultato_tool = {
-            "ok": True,
-            "operation": "get_system_info",
-            "status": "success",
-            "data": {
-                "os_name": "Windows",
-                "os_release": "11",
-                "machine": "AMD64",
-                "python_version": "3.12.4",
-                "cpu_count": 24,
-                "processor": "AMD64 Family 25 Model 33 Stepping 0, AuthenticAMD",
-            },
-        }
-
-        testo = fallback_deterministico_sistema(risultato_tool)
+        testo = fallback_deterministico_sistema(_risultato_system_info())
 
         self.assertIn("Windows", testo)
         self.assertIn("11", testo)
         self.assertIn("AMD64", testo)
-        self.assertIn("24", testo)
         self.assertIn("3.12.4", testo)
+        self.assertIn("Processore: Example CPU 8-Core Processor", testo)
+        self.assertIn("Core fisici: 12", testo)
+        self.assertIn("Processori logici (thread): 24", testo)
+        self.assertIn("Uso CPU: 38%", testo)
+        self.assertIn("RAM totale: 32.00 GiB", testo)
+        self.assertIn("RAM disponibile: 12.00 GiB", testo)
+        self.assertIn("RAM in uso: 20.00 GiB (62.5%)", testo)
+        self.assertIn("Acceso da: 1 g, 0 h, 0 min", testo)
+
+    def test_nessuna_etichetta_cpu_ambigua(self):
+        testo = fallback_deterministico_sistema(_risultato_system_info())
+        self.assertNotIn("CPU logiche", testo)
+
+    def test_uptime_formattato(self):
+        testo = fallback_deterministico_sistema(
+            _risultato_system_info(uptime_seconds=2 * 86_400 + 3 * 3600 + 4 * 60 + 5)
+        )
+        self.assertIn("Acceso da: 2 g, 3 h, 4 min", testo)
+
+    def test_metriche_none_non_disponibili(self):
+        testo = fallback_deterministico_sistema(
+            _risultato_system_info(
+                cpu={
+                    "physical_cores": None,
+                    "logical_processors": None,
+                    "usage_percent": None,
+                },
+                memory={
+                    "total_bytes": None,
+                    "available_bytes": None,
+                    "used_bytes": None,
+                    "usage_percent": None,
+                },
+                uptime_seconds=None,
+            )
+        )
+
+        self.assertIn("Core fisici: non disponibile", testo)
+        self.assertIn("Processori logici (thread): non disponibile", testo)
+        self.assertIn("Uso CPU: non disponibile", testo)
+        self.assertIn("RAM totale: non disponibile", testo)
+        self.assertIn("RAM in uso: non disponibile (non disponibile)", testo)
+        self.assertIn("Acceso da: non disponibile", testo)
+        self.assertNotIn("None", testo)
+
+    def test_cpu_e_memoria_non_dict_non_crashano(self):
+        risultato_tool = _risultato_system_info()
+        risultato_tool["data"]["cpu"] = None
+        risultato_tool["data"]["memory"] = "x"
+
+        testo = fallback_deterministico_sistema(risultato_tool)
+        self.assertIn("Processore: non disponibile", testo)
+        self.assertIn("RAM totale: non disponibile", testo)
 
     def test_errore(self):
         risultato_tool = {
@@ -344,59 +1333,27 @@ class TestFallbackDeterministicoSistema(unittest.TestCase):
         self.assertNotIn("memoria", testo.lower())
         self.assertNotIn("ricordo", testo.lower())
 
-    def test_gestisce_processor_vuoto(self):
-        risultato_tool = {
-            "ok": True,
-            "operation": "get_system_info",
-            "status": "success",
-            "data": {
-                "os_name": "Linux",
-                "os_release": "6.8.0",
-                "machine": "x86_64",
-                "python_version": "3.12.4",
-                "cpu_count": 8,
-                "processor": "",
-            },
-        }
-
-        testo = fallback_deterministico_sistema(risultato_tool)
-        self.assertIn("non disponibile", testo)
+    def test_gestisce_modello_none(self):
+        testo = fallback_deterministico_sistema(
+            _risultato_system_info(
+                cpu={"model": None},
+                os_name="Linux",
+                os_release="6.8.0",
+                machine="x86_64",
+            )
+        )
+        self.assertIn("Processore: non disponibile", testo)
         self.assertNotIn("Processore: \n", testo)
 
-    def test_gestisce_cpu_count_none(self):
-        risultato_tool = {
-            "ok": True,
-            "operation": "get_system_info",
-            "status": "success",
-            "data": {
-                "os_name": "Linux",
-                "os_release": "6.8.0",
-                "machine": "x86_64",
-                "python_version": "3.12.4",
-                "cpu_count": None,
-                "processor": "generic",
-            },
-        }
-
-        testo = fallback_deterministico_sistema(risultato_tool)
-        self.assertIn("CPU logiche: non disponibile", testo)
+    def test_gestisce_logici_none(self):
+        testo = fallback_deterministico_sistema(
+            _risultato_system_info(cpu={"logical_processors": None})
+        )
+        self.assertIn("Processori logici (thread): non disponibile", testo)
+        self.assertIn("Core fisici: 12", testo)
 
     def test_nessun_messaggio_memoria(self):
-        risultato_tool = {
-            "ok": True,
-            "operation": "get_system_info",
-            "status": "success",
-            "data": {
-                "os_name": "Windows",
-                "os_release": "11",
-                "machine": "AMD64",
-                "python_version": "3.12.4",
-                "cpu_count": 24,
-                "processor": "x",
-            },
-        }
-
-        testo = fallback_deterministico_sistema(risultato_tool)
+        testo = fallback_deterministico_sistema(_risultato_system_info())
         self.assertNotIn("ricordo", testo.lower())
         self.assertNotIn("memoria", testo.lower())
 
@@ -448,7 +1405,7 @@ class TestFallbackDeterministicoSistema(unittest.TestCase):
 
         testo = fallback_deterministico_sistema(risultato_tool)
         self.assertNotIn("Sistema operativo", testo)
-        self.assertNotIn("CPU logiche", testo)
+        self.assertNotIn("Processori logici", testo)
 
     def test_operation_sconosciuta_usa_fallback_generico_non_dump(self):
         risultato_tool = {
@@ -619,7 +1576,7 @@ class TestErrorePrivacyGetSystemInfo(unittest.TestCase):
 class TestPipelinePostToolSystem(unittest.TestCase):
 
     def setUp(self):
-        self.risultato_tool = get_system_info({}, None)
+        self.risultato_tool = _esegui_get_system_info()
 
     def test_secondo_giro_riuscito(self):
         stream = [_messaggio("Stai usando Windows.")]
