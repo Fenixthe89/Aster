@@ -3,8 +3,9 @@
 
 Verifica limita_cronologia: compattazione dei risultati tool
 voluminosi, compattazione della risposta assistant lunga nei soli
-turni tool pesanti, limite per numero di messaggi e per caratteri,
-tagli sempre per turni interi (nessun messaggio orfano).
+turni tool pesanti, limite per numero di messaggi e per unità pesate
+(cifre ASCII 3, ogni altro carattere 1), tagli sempre per turni interi
+(nessun messaggio orfano).
 
 Verifica il rollback del turno in avvia_chat: su eccezione o
 interruzione la cronologia torna esattamente allo stato pre-turno.
@@ -42,7 +43,7 @@ import modules.file_tools as file_tools
 import modules.runtime_paths as runtime_paths
 import modules.tool_response as tool_response
 from modules.chat import (
-    MAX_CARATTERI_CRONOLOGIA,
+    MAX_UNITA_CRONOLOGIA,
     PLACEHOLDER_RISPOSTA_OMESSA,
     PLACEHOLDER_TOOL_OMESSO,
     SOGLIA_COMPATTAZIONE_RISPOSTA,
@@ -146,6 +147,18 @@ def _ruolo(messaggio):
 
 def _contenuti_tool(messaggi):
     return [m["content"] for m in messaggi if isinstance(m, dict) and m.get("role") == "tool"]
+
+
+def _costo_totale(messaggi):
+    """Unità pesate della cronologia (sistema escluso), come le conta limita_cronologia."""
+
+    return sum(chat._costo_cronologia(m) for m in messaggi[1:])
+
+
+def _turni_precedenti(messaggi):
+    """Turni completi conservati prima del turno corrente."""
+
+    return sum(1 for m in messaggi[1:] if _ruolo(m) == "user") - 1
 
 
 def _assert_nessun_orfano(test, messaggi):
@@ -328,7 +341,7 @@ class TestCompattazione(unittest.TestCase):
 
 class TestLimiti(unittest.TestCase):
 
-    def test_09_tetto_caratteri_applicato(self):
+    def test_09_tetto_unita_applicato(self):
         conversazione = []
         for indice in range(8):
             conversazione += [_user(f"domanda {indice}"), _assistant("a" * 1500)]
@@ -336,12 +349,11 @@ class TestLimiti(unittest.TestCase):
 
         messaggi = _limita(conversazione, limite=100)
 
-        totale = sum(len(m["content"]) for m in messaggi[1:])
-        self.assertLessEqual(totale, MAX_CARATTERI_CRONOLOGIA)
+        self.assertLessEqual(_costo_totale(messaggi), MAX_UNITA_CRONOLOGIA)
         self.assertLess(len(messaggi), len(conversazione) + 1)
 
     def test_10_ultimo_user_preservato_anche_se_enorme(self):
-        enorme = "u" * (MAX_CARATTERI_CRONOLOGIA * 3)
+        enorme = "u" * (MAX_UNITA_CRONOLOGIA * 3)
         conversazione = [_user("vecchia"), _assistant("ok"), _user(enorme)]
 
         messaggi = _limita(conversazione)
@@ -378,8 +390,197 @@ class TestLimiti(unittest.TestCase):
         compattati = [json.loads(c).get("omitted_from_history") is True for c in contenuti]
         self.assertEqual(compattati, [True, True, False, True])
         self.assertLessEqual(
-            sum(len(json.dumps(c)) for c in contenuti), MAX_CARATTERI_CRONOLOGIA
+            sum(chat._unita_testo(c) for c in contenuti), MAX_UNITA_CRONOLOGIA
         )
+
+
+# =====================================================================
+# Costo pesato della cronologia (context hardening)
+# =====================================================================
+
+class TestCostoCronologia(unittest.TestCase):
+
+    def test_lettere_un_unita_ciascuna(self):
+        self.assertEqual(chat._unita_testo("abc"), 3)
+
+    def test_cifre_tre_unita_ciascuna(self):
+        self.assertEqual(chat._unita_testo("123"), 9)
+
+    def test_misto(self):
+        self.assertEqual(chat._unita_testo("a1b2"), 8)
+
+    def test_zero(self):
+        self.assertEqual(chat._unita_testo("0"), 3)
+
+    def test_tutte_le_cifre_ascii(self):
+        self.assertEqual(chat._unita_testo("0123456789"), 30)
+
+    def test_vuoto(self):
+        self.assertEqual(chat._unita_testo(""), 0)
+
+    def test_senza_cifre_uguale_alla_lunghezza(self):
+        for testo in (
+            "Preferisco Linux per i server.",
+            "   \t\n  ",
+            ".,;:!?()[]{}<>'\"-_/\\|@#$%^&*+=~`",
+            "def f(x):\n\treturn {'k': [x]}  # ok!",
+            "SELECT nome FROM utenti WHERE attivo = TRUE;",
+        ):
+            with self.subTest(testo=testo):
+                self.assertEqual(chat._unita_testo(testo), len(testo))
+
+    def test_unicode_non_numerico_un_unita_per_carattere(self):
+        testo = "àèìòù €漢字 ñ ß 😀"
+        self.assertEqual(chat._unita_testo(testo), len(testo))
+
+    def test_cifre_unicode_non_ascii_non_pesate(self):
+        # Apici, cifre arabo-indiane e devanagari: solo ASCII 0-9 pesa 3.
+        self.assertEqual(chat._unita_testo("²³٣४"), 4)
+
+    def test_messaggio_dict(self):
+        self.assertEqual(chat._costo_cronologia(_user("a1")), 4)
+
+    def test_messaggio_senza_contenuto(self):
+        self.assertEqual(chat._costo_cronologia({"role": "assistant", "content": None}), 0)
+        self.assertEqual(chat._costo_cronologia(_assistant("")), 0)
+
+    def test_tool_call_nome_e_argomenti_pesati(self):
+        messaggio = _tool_call("elimina_memoria", {"memory_id": 123})
+        # nome: 15 lettere/underscore; argomenti "{'memory_id': 123}": 18 caratteri, 3 cifre.
+        self.assertEqual(chat._costo_cronologia(messaggio), 15 + 18 + 2 * 3)
+
+    def test_vecchi_nomi_rimossi(self):
+        self.assertFalse(hasattr(chat, "MAX_CARATTERI_CRONOLOGIA"))
+        self.assertFalse(hasattr(chat, "_dimensione_messaggio"))
+
+
+class TestBudgetPesato(unittest.TestCase):
+
+    def test_costanti(self):
+        self.assertEqual(MAX_UNITA_CRONOLOGIA, 4000)
+        self.assertEqual(SOGLIA_COMPATTAZIONE_TOOL, 1000)
+        self.assertEqual(SOGLIA_COMPATTAZIONE_RISPOSTA, 2000)
+
+    def _conversazione(self, carattere, turni=6, lunghezza=700):
+        conversazione = []
+        for indice in range(turni):
+            conversazione += [_user(f"domanda {indice}"), _assistant(carattere * lunghezza)]
+        conversazione.append(_user("corrente"))
+        return conversazione
+
+    def test_prosa_mantiene_piu_storia_dei_numeri(self):
+        prosa = _limita(self._conversazione("a"), limite=100)
+        numeri = _limita(self._conversazione("7"), limite=100)
+
+        self.assertGreater(_turni_precedenti(prosa), _turni_precedenti(numeri))
+        self.assertEqual(_turni_precedenti(numeri), 1)
+
+    def test_numeri_potati_anche_sotto_il_budget_in_caratteri(self):
+        conversazione = self._conversazione("1", turni=3, lunghezza=600)
+        caratteri = sum(len(m["content"]) for m in conversazione)
+        self.assertLess(caratteri, MAX_UNITA_CRONOLOGIA)
+
+        messaggi = _limita(conversazione, limite=100)
+
+        self.assertLess(_turni_precedenti(messaggi), 3)
+        self.assertLessEqual(_costo_totale(messaggi), MAX_UNITA_CRONOLOGIA)
+
+    def _turni_tool_con_argomenti(self, query, turni=4):
+        conversazione = []
+        for indice in range(turni):
+            conversazione += [
+                _user(f"cerca {indice}"),
+                _tool_call("cerca_memoria", {"query": query}),
+                _tool({"ok": True, "operation": "search", "status": "searched"}),
+                _assistant("fatto"),
+            ]
+        conversazione.append(_user("corrente"))
+        return conversazione
+
+    def test_cifre_negli_argomenti_tool_pesate(self):
+        lettere = _limita(self._turni_tool_con_argomenti("a" * 500), limite=100)
+        cifre = _limita(self._turni_tool_con_argomenti("9" * 500), limite=100)
+
+        self.assertGreater(_turni_precedenti(lettere), _turni_precedenti(cifre))
+        for messaggi in (lettere, cifre):
+            _assert_nessun_orfano(self, messaggi)
+            self.assertLessEqual(_costo_totale(messaggi), MAX_UNITA_CRONOLOGIA)
+
+    def test_budget_rispettato_salvo_il_solo_ultimo_turno(self):
+        casi = [
+            self._conversazione("a"),
+            self._conversazione("5"),
+            self._conversazione("a1", turni=10, lunghezza=300),
+            self._turni_tool_con_argomenti("42" * 300),
+            [*_turno_tool(_risultato_processi(), nome="list_processes"),
+             *_turno_tool({"ok": True, "operation": "x", "status": "success", "data": "8" * 900}),
+             _user("corrente")],
+        ]
+        for conversazione in casi:
+            messaggi = _limita(conversazione, limite=100)
+            with self.subTest(turni=_turni_precedenti(messaggi)):
+                _assert_nessun_orfano(self, messaggi)
+                self.assertEqual(messaggi[-1], _user("corrente"))
+                if _turni_precedenti(messaggi) > 0:
+                    self.assertLessEqual(_costo_totale(messaggi), MAX_UNITA_CRONOLOGIA)
+
+    def test_taglio_per_turni_interi(self):
+        conversazione = []
+        for indice in range(5):
+            conversazione += _turno_tool(
+                {"ok": True, "operation": "x", "status": "success", "data": "3" * 400},
+                risposta="0" * 300,
+                domanda=f"d{indice}",
+            )
+        conversazione.append(_user("corrente"))
+
+        messaggi = _limita(conversazione, limite=100)
+
+        _assert_nessun_orfano(self, messaggi)
+        # Ogni turno conservato è completo: user, tool call, tool, assistant.
+        corpo = messaggi[1:-1]
+        self.assertEqual(len(corpo) % 4, 0)
+        for inizio in range(0, len(corpo), 4):
+            self.assertEqual(
+                [_ruolo(m) for m in corpo[inizio:inizio + 4]],
+                ["user", "assistant", "tool", "assistant"],
+            )
+        self.assertLessEqual(_costo_totale(messaggi), MAX_UNITA_CRONOLOGIA)
+
+    def test_ultimo_user_numerico_enorme_preservato(self):
+        # Contratto attuale (debito noto): il turno corrente non viene mai
+        # rimosso né troncato, anche se da solo supera il budget.
+        enorme = "9" * MAX_UNITA_CRONOLOGIA
+        conversazione = [_user("vecchia"), _assistant("ok"), _user(enorme)]
+
+        messaggi = _limita(conversazione)
+
+        self.assertEqual(messaggi, [SISTEMA, _user(enorme)])
+        self.assertGreater(_costo_totale(messaggi), MAX_UNITA_CRONOLOGIA)
+
+    def test_ultimo_turno_con_tool_preservato_anche_oltre_budget(self):
+        ultimo = _turno_tool(
+            {"ok": True, "operation": "x", "status": "success"},
+            risposta="1" * MAX_UNITA_CRONOLOGIA,
+            domanda="corrente",
+        )
+        conversazione = [_user("vecchia"), _assistant("ok"), *ultimo]
+
+        messaggi = _limita(conversazione)
+
+        self.assertEqual(messaggi[1:], ultimo)
+
+    def test_soglie_di_compattazione_restano_in_caratteri(self):
+        base = {"ok": True, "operation": "x", "status": "success", "data": ""}
+        cifre = SOGLIA_COMPATTAZIONE_TOOL - len(json.dumps(base, ensure_ascii=False))
+        risultato = dict(base, data="7" * cifre)
+        contenuto = json.dumps(risultato, ensure_ascii=False)
+        self.assertEqual(len(contenuto), SOGLIA_COMPATTAZIONE_TOOL)
+
+        messaggi = _limita([*_turno_tool(risultato), _user("corrente")])
+
+        # 1000 caratteri ma ~2900 unità: non compattato (soglia in caratteri).
+        self.assertEqual(_contenuti_tool(messaggi), [contenuto])
 
 
 # =====================================================================

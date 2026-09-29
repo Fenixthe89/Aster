@@ -402,13 +402,18 @@ def _fallback_minimo_dominio_sconosciuto(risultato_tool: dict) -> str:
     return "Non riesco a gestire questa richiesta."
 
 # ---------------------------------------------------------------------
-# Budget della cronologia (0.6.8)
+# Budget della cronologia (0.6.8, in unità pesate dal context hardening)
 # ---------------------------------------------------------------------
-# Rete di sicurezza pratica, NON una garanzia token-safe: i caratteri
-# non sono token (es. le cifre valgono circa un token ciascuna).
+# Rete di sicurezza pratica, NON una garanzia token-safe. Il budget è in
+# unità pesate: ogni cifra ASCII 0-9 costa 3 unità (per il modello una
+# cifra vale circa un token), ogni altro carattere 1. Le soglie di
+# compattazione restano in caratteri.
 SOGLIA_COMPATTAZIONE_TOOL = 1000
 SOGLIA_COMPATTAZIONE_RISPOSTA = 2000
-MAX_CARATTERI_CRONOLOGIA = 6000
+MAX_UNITA_CRONOLOGIA = 4000
+
+_CIFRE_ASCII = "0123456789"
+_PESO_CIFRA = 3
 
 # Placeholder fisso per un risultato tool non JSON: nessun dato originale.
 PLACEHOLDER_TOOL_OMESSO = '{"omitted_from_history": true}'
@@ -434,17 +439,25 @@ def _ha_tool_calls(messaggio) -> bool:
     )
 
 
-def _dimensione_messaggio(messaggio) -> int:
-    """Caratteri di un messaggio: contenuto più nome/argomenti delle tool call."""
+def _unita_testo(testo: str) -> int:
+    """Unità pesate di un testo: 3 per ogni cifra ASCII 0-9, 1 per ogni altro carattere."""
 
-    dimensione = len(_campo(messaggio, "content") or "")
+    # Solo ASCII: str.isdigit() includerebbe anche cifre Unicode (es. "²").
+    cifre = sum(testo.count(cifra) for cifra in _CIFRE_ASCII)
+    return len(testo) + (_PESO_CIFRA - 1) * cifre
+
+
+def _costo_cronologia(messaggio) -> int:
+    """Costo di un messaggio in unità pesate: contenuto più nome/argomenti delle tool call."""
+
+    costo = _unita_testo(_campo(messaggio, "content") or "")
 
     for chiamata in _campo(messaggio, "tool_calls") or []:
         funzione = _campo(chiamata, "function")
-        dimensione += len(str(_campo(funzione, "name") or ""))
-        dimensione += len(str(_campo(funzione, "arguments") or ""))
+        costo += _unita_testo(str(_campo(funzione, "name") or ""))
+        costo += _unita_testo(str(_campo(funzione, "arguments") or ""))
 
-    return dimensione
+    return costo
 
 
 def _tool_gia_compattato(contenuto: str) -> bool:
@@ -595,7 +608,7 @@ def limita_cronologia(
 
     Ordine: divisione in turni interi (scarta pezzi iniziali orfani e
     turni incoerenti) -> compattazione dei risultati tool voluminosi ->
-    limite per numero di messaggi -> limite per caratteri. I tagli
+    limite per numero di messaggi -> limite per unità pesate. I tagli
     avvengono sempre per turni interi, mai a metà turno. L'ultimo
     turno (che contiene il messaggio user corrente) resta sempre.
     """
@@ -619,9 +632,9 @@ def limita_cronologia(
     def totale_messaggi():
         return sum(len(turno) for turno in turni)
 
-    def totale_caratteri():
+    def totale_unita():
         return sum(
-            _dimensione_messaggio(messaggio)
+            _costo_cronologia(messaggio)
             for turno in turni
             for messaggio in turno
         )
@@ -629,7 +642,7 @@ def limita_cronologia(
     while len(turni) > 1 and totale_messaggi() > max_messaggi:
         turni.pop(0)
 
-    while len(turni) > 1 and totale_caratteri() > MAX_CARATTERI_CRONOLOGIA:
+    while len(turni) > 1 and totale_unita() > MAX_UNITA_CRONOLOGIA:
         turni.pop(0)
 
     messaggi[:] = [
