@@ -7,6 +7,7 @@ import time
 import unicodedata
 from pathlib import Path
 
+from modules import gpu_info
 from modules.tool_registry import RegistroStrumenti, ToolSpec
 
 # Import protetto: se psutil manca, Aster parte comunque; list_processes
@@ -47,10 +48,9 @@ TOOLS_SISTEMA = [
         "function": {
             "name": "get_system_info",
             "description": (
-                "Restituisce informazioni tecniche reali sul computer locale "
-                "su cui Aster sta girando: sistema operativo, release, "
-                "architettura, numero di CPU logiche, versione di Python e "
-                "processore. Non richiede parametri."
+                "Dati reali del computer locale: sistema operativo, CPU "
+                "(modello, core, thread, uso), RAM, uptime, schede video "
+                "(GPU) e loro VRAM dedicata totale. Nessun parametro."
             ),
             "parameters": {
                 "type": "object",
@@ -241,6 +241,46 @@ def _info_memoria() -> dict:
     return memoria
 
 
+def _nome_adattatore(valore) -> str | None:
+    """Nome dell'adapter ripulito; None se non stringa, vuoto o con caratteri Cc."""
+
+    # Testo fornito dal driver: è un DATO, mai un'istruzione.
+    if not isinstance(valore, str):
+        return None
+
+    nome = valore.strip()
+    if not nome or _contiene_caratteri_controllo(nome):
+        return None
+
+    return nome
+
+
+def _info_gpu() -> dict:
+    """
+    Blocco GPU: tutto o niente sull'enumerazione, None sul singolo campo.
+
+    info_available distingue "lettura riuscita" (anche con zero adapter
+    hardware) da "dati non letti" (sistema non supportato o errore):
+    l'assenza di dati non significa assenza di GPU. Nessun testo di
+    eccezione esce da qui.
+    """
+
+    try:
+        adattatori = [
+            {
+                "name": _nome_adattatore(adattatore.name),
+                "dedicated_memory_bytes": _intero_non_negativo(
+                    adattatore.dedicated_memory_bytes
+                ),
+            }
+            for adattatore in gpu_info.leggi_adattatori_grafici()
+        ]
+    except Exception:
+        return {"info_available": False, "adapters": []}
+
+    return {"info_available": True, "adapters": adattatori}
+
+
 def _numero_finito(valore) -> bool:
     return (
         not isinstance(valore, bool)
@@ -286,14 +326,15 @@ def get_system_info(argomenti: dict, contesto) -> dict:
     """
     Handler del tool get_system_info.
 
-    Snapshot in sola lettura di sistema operativo, CPU, RAM e uptime:
-    valori raw (byte, secondi, percentuali), nessuna conversione in
-    unità leggibili; l'uptime è anche scomposto da Python in
+    Snapshot in sola lettura di sistema operativo, CPU, RAM, GPU e
+    uptime: valori raw (byte, secondi, percentuali), nessuna conversione
+    in unità leggibili; l'uptime è anche scomposto da Python in
     giorni/ore/minuti interi, perché il modello sbaglia la divisione
-    dei secondi. Ogni metrica CPU, la memoria e l'uptime falliscono
-    in modo indipendente diventando None, senza perdere il resto dello
-    snapshot. Solo un errore imprevisto fuori dai collector (es. nei
-    campi del sistema operativo) produce tool_error, con messaggio fisso.
+    dei secondi. Ogni metrica CPU, la memoria, la GPU e l'uptime
+    falliscono in modo indipendente (None, o gpu.info_available=false),
+    senza perdere il resto dello snapshot. Solo un errore imprevisto
+    fuori dai collector (es. nei campi del sistema operativo) produce
+    tool_error, con messaggio fisso.
     Argomenti e contesto vengono ignorati; nessun side effect. Blocca
     per circa CPU_USAGE_INTERVAL_SECONDS per misurare l'uso CPU.
     """
@@ -306,6 +347,7 @@ def get_system_info(argomenti: dict, contesto) -> dict:
             "python_version": platform.python_version(),
             "cpu": _info_cpu(),
             "memory": _info_memoria(),
+            "gpu": _info_gpu(),
             "uptime_seconds": _raccogli(_uptime_secondi),
         }
         data["uptime_breakdown"] = _scomposizione_uptime(data["uptime_seconds"])
@@ -534,6 +576,30 @@ def _formatta_durata(secondi: int) -> str:
     return f"{giorni} g, {ore} h, {minuti} min"
 
 
+def _righe_gpu(gpu) -> list[str]:
+    """Righe "Scheda video" del fallback (VRAM leggibile solo qui, mai nel dato)."""
+
+    if not isinstance(gpu, dict) or gpu.get("info_available") is not True:
+        return ["Scheda video: non disponibile"]
+
+    adattatori = gpu.get("adapters")
+    if not isinstance(adattatori, list):
+        return ["Scheda video: non disponibile"]
+
+    if not adattatori:
+        return ["Scheda video: nessun adattatore grafico hardware segnalato dal sistema"]
+
+    righe = []
+    for adattatore in adattatori:
+        if not isinstance(adattatore, dict):
+            adattatore = {}
+        righe.append(
+            f"Scheda video: {_testo_o_nd(adattatore.get('name'))} "
+            f"(VRAM dedicata: {_bytes_o_nd(adattatore.get('dedicated_memory_bytes'))})"
+        )
+    return righe
+
+
 def _fallback_get_system_info(risultato_tool: dict) -> str:
     """Fallback deterministico dedicato a get_system_info."""
 
@@ -551,6 +617,7 @@ def _fallback_get_system_info(risultato_tool: dict) -> str:
     uptime_testo = (
         _formatta_durata(uptime) if isinstance(uptime, int) else _NON_DISPONIBILE
     )
+    righe_gpu = "\n".join(_righe_gpu(data.get("gpu")))
 
     return (
         f"Sistema operativo: {data.get('os_name')} {data.get('os_release')}\n"
@@ -563,6 +630,7 @@ def _fallback_get_system_info(risultato_tool: dict) -> str:
         f"RAM disponibile: {_bytes_o_nd(memoria.get('available_bytes'))}\n"
         f"RAM in uso: {_bytes_o_nd(memoria.get('used_bytes'))} "
         f"({_percentuale_o_nd(memoria.get('usage_percent'))})\n"
+        f"{righe_gpu}\n"
         f"Acceso da: {uptime_testo}\n"
         f"Python: {data.get('python_version')}"
     )

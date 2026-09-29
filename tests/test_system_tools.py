@@ -17,6 +17,10 @@ psutil, winreg, platform.processor e time finti, quindi senza l'attesa
 reale di cpu_percent; resta un solo smoke reale sulla macchina di test,
 senza valori hardware hardcodati.
 
+0.7.2b: il blocco gpu usa sempre un backend finto (anche nello smoke
+reale): nessun test di questo file chiama DXGI. Il backend reale è
+coperto da tests/test_gpu_info.py.
+
 Nessun file in data/ viene mai letto o scritto. Nessuna chiamata a
 Ollama: esegui_risposta_finale viene sempre sostituita con un doppio
 di test.
@@ -37,6 +41,7 @@ if str(BASE_DIR) not in sys.path:
 
 import modules.system_tools as system_tools
 import modules.tool_response as tool_response
+from modules.gpu_info import AdattatoreGrafico, GpuNonDisponibile
 from modules.system_tools import (
     TOOLS_SISTEMA,
     fallback_deterministico_sistema,
@@ -54,8 +59,19 @@ CAMPI_ATTESI_SYSTEM_INFO = {
     "python_version",
     "cpu",
     "memory",
+    "gpu",
     "uptime_seconds",
     "uptime_breakdown",
+}
+
+CAMPI_ATTESI_GPU = {
+    "info_available",
+    "adapters",
+}
+
+CAMPI_ATTESI_ADAPTER = {
+    "name",
+    "dedicated_memory_bytes",
 }
 
 CAMPI_ATTESI_UPTIME_BREAKDOWN = {
@@ -106,6 +122,21 @@ CHIAVI_VIETATE = {
     "drive",
     "volume",
     "cwd",
+    # 0.7.2b: identificativi e dettagli GPU mai esposti.
+    "vendor_id",
+    "device_id",
+    "subsys_id",
+    "revision",
+    "luid",
+    "adapter_luid",
+    "flags",
+    "uuid",
+    "pci",
+    "pnp_device_id",
+    "driver",
+    "driver_path",
+    "shared_system_memory",
+    "dedicated_system_memory",
 }
 
 
@@ -244,24 +275,29 @@ class TestRegistrazioneSistema(unittest.TestCase):
 
 
 def _tutte_le_chiavi(valore) -> set:
-    """Chiavi di un dict e di tutti i dict annidati, in minuscolo."""
+    """Chiavi di un dict e di tutti i dict annidati (anche in liste), in minuscolo."""
 
     chiavi = set()
     if isinstance(valore, dict):
         for chiave, interno in valore.items():
             chiavi.add(str(chiave).lower())
             chiavi |= _tutte_le_chiavi(interno)
+    elif isinstance(valore, list):
+        for interno in valore:
+            chiavi |= _tutte_le_chiavi(interno)
     return chiavi
 
 
 def _tutte_le_stringhe(valore) -> list:
-    """Valori stringa di un dict e di tutti i dict annidati."""
+    """Valori stringa di un dict e di tutti i dict/liste annidati."""
 
     if isinstance(valore, str):
         return [valore]
     if isinstance(valore, dict):
+        valore = list(valore.values())
+    if isinstance(valore, list):
         stringhe = []
-        for interno in valore.values():
+        for interno in valore:
             stringhe.extend(_tutte_le_stringhe(interno))
         return stringhe
     return []
@@ -276,7 +312,14 @@ class TestHandlerGetSystemInfo(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.risultato = get_system_info({}, None)
+        # Smoke reale di OS/CPU/RAM/uptime, ma GPU sempre finta: DXGI
+        # reale solo in tests/test_gpu_info.py.
+        originale = system_tools.gpu_info.leggi_adattatori_grafici
+        system_tools.gpu_info.leggi_adattatori_grafici = lambda: [_GPU_FINTA]
+        try:
+            cls.risultato = get_system_info({}, None)
+        finally:
+            system_tools.gpu_info.leggi_adattatori_grafici = originale
 
     def test_successo(self):
         self.assertTrue(self.risultato["ok"])
@@ -294,6 +337,7 @@ class TestHandlerGetSystemInfo(unittest.TestCase):
             set(data["uptime_breakdown"].keys()),
             CAMPI_ATTESI_UPTIME_BREAKDOWN,
         )
+        self.assertEqual(set(data["gpu"].keys()), CAMPI_ATTESI_GPU)
 
     def test_tipi_corretti(self):
         data = self.risultato["data"]
@@ -337,6 +381,10 @@ class TestHandlerGetSystemInfo(unittest.TestCase):
             else:
                 self.assertTrue(type(valore) is int and valore >= 0, msg=campo)
 
+        gpu = data["gpu"]
+        self.assertIs(type(gpu["info_available"]), bool)
+        self.assertIsInstance(gpu["adapters"], list)
+
     def test_json_serializzabile(self):
         json.dumps(self.risultato, allow_nan=False)
 
@@ -369,6 +417,9 @@ _AVVIO_FINTO = 1_000_000.0
 _ADESSO_FINTO = _AVVIO_FINTO + 86_400.0
 _MODELLO_REGISTRO_FINTO = "Example CPU 8-Core Processor            "
 _PROCESSOR_FALLBACK_FINTO = "Fallback CPU Family 1, GenuineExample"
+
+_GIB = 1024 ** 3
+_GPU_FINTA = AdattatoreGrafico("Example Graphics Adapter", 8 * _GIB)
 
 
 def _valore_o_errore(valore):
@@ -467,30 +518,37 @@ def _esegui_get_system_info(
     winreg_finto=_PREDEFINITO,
     processor=_PROCESSOR_FALLBACK_FINTO,
     adesso=_ADESSO_FINTO,
+    gpu=_PREDEFINITO,
 ):
     """
-    Esegue get_system_info con doppi di psutil, winreg, platform.processor
-    e time (nessuna attesa reale). winreg_finto=None simula un sistema
-    senza winreg; processor/adesso possono essere eccezioni da sollevare;
-    adesso può anche essere un callable (es. un orologio che conta le chiamate).
+    Esegue get_system_info con doppi di psutil, winreg, platform.processor,
+    time e backend GPU (nessuna attesa reale, nessuna chiamata DXGI).
+    winreg_finto=None simula un sistema senza winreg; processor/adesso
+    possono essere eccezioni da sollevare; adesso può anche essere un
+    callable (es. un orologio che conta le chiamate). gpu è la lista
+    restituita dal backend GPU finto oppure un'eccezione da sollevare.
     """
 
     if psutil_finto is _PREDEFINITO:
         psutil_finto = _PsutilSystemInfoFinto()
     if winreg_finto is _PREDEFINITO:
         winreg_finto = _WinregFinto()
+    if gpu is _PREDEFINITO:
+        gpu = [_GPU_FINTA]
 
     originali = (
         system_tools.psutil,
         system_tools.winreg,
         system_tools.platform.processor,
         system_tools.time,
+        system_tools.gpu_info.leggi_adattatori_grafici,
     )
     system_tools.psutil = psutil_finto
     system_tools.winreg = winreg_finto
     system_tools.platform.processor = lambda: _valore_o_errore(processor)
     orologio = adesso if callable(adesso) else (lambda: _valore_o_errore(adesso))
     system_tools.time = SimpleNamespace(time=orologio)
+    system_tools.gpu_info.leggi_adattatori_grafici = lambda: _valore_o_errore(gpu)
     try:
         return system_tools.get_system_info({}, None)
     finally:
@@ -499,6 +557,7 @@ def _esegui_get_system_info(
             system_tools.winreg,
             system_tools.platform.processor,
             system_tools.time,
+            system_tools.gpu_info.leggi_adattatori_grafici,
         ) = originali
 
 
@@ -1121,6 +1180,9 @@ class TestContrattoOutputSystemInfo(unittest.TestCase):
             set(self.data["uptime_breakdown"].keys()),
             CAMPI_ATTESI_UPTIME_BREAKDOWN,
         )
+        self.assertEqual(set(self.data["gpu"].keys()), CAMPI_ATTESI_GPU)
+        for adattatore in self.data["gpu"]["adapters"]:
+            self.assertEqual(set(adattatore.keys()), CAMPI_ATTESI_ADAPTER)
 
     def test_campi_legacy_ambigui_assenti(self):
         chiavi = _tutte_le_chiavi(self.data)
@@ -1176,6 +1238,7 @@ class TestContrattoOutputSystemInfo(unittest.TestCase):
                 self.data["machine"],
                 self.data["python_version"],
                 self.data["cpu"]["model"],
+                self.data["gpu"]["adapters"][0]["name"],
             },
         )
 
@@ -1208,10 +1271,266 @@ class TestContrattoOutputSystemInfo(unittest.TestCase):
 
 
 # =====================================================================
+# 0.7.2b - blocco gpu di get_system_info (backend GPU sempre finto)
+# =====================================================================
+
+class TestGpuSystemInfo(unittest.TestCase):
+
+    def _gpu(self, gpu):
+        risultato = _esegui_get_system_info(gpu=gpu)
+        self.assertTrue(risultato["ok"])
+        return risultato["data"]["gpu"]
+
+    def test_una_gpu(self):
+        self.assertEqual(
+            self._gpu([AdattatoreGrafico("Example GPU", 8 * _GIB)]),
+            {
+                "info_available": True,
+                "adapters": [
+                    {"name": "Example GPU", "dedicated_memory_bytes": 8 * _GIB},
+                ],
+            },
+        )
+
+    def test_due_adapter_ordine_del_backend(self):
+        gpu = self._gpu([
+            AdattatoreGrafico("Example Integrated", 128 * 1024 ** 2),
+            AdattatoreGrafico("Example Discrete", 16 * _GIB),
+        ])
+        self.assertTrue(gpu["info_available"])
+        self.assertEqual(
+            gpu["adapters"],
+            [
+                {"name": "Example Integrated", "dedicated_memory_bytes": 128 * 1024 ** 2},
+                {"name": "Example Discrete", "dedicated_memory_bytes": 16 * _GIB},
+            ],
+        )
+
+    def test_ordine_non_riordinato(self):
+        gpu = self._gpu([
+            AdattatoreGrafico("Zeta", 1),
+            AdattatoreGrafico("Alpha", 2),
+        ])
+        self.assertEqual(
+            [adattatore["name"] for adattatore in gpu["adapters"]],
+            ["Zeta", "Alpha"],
+        )
+
+    def test_adapter_identici_mantenuti(self):
+        gpu = self._gpu([_GPU_FINTA, _GPU_FINTA])
+        self.assertEqual(len(gpu["adapters"]), 2)
+
+    def test_zero_adapter_hardware(self):
+        self.assertEqual(
+            self._gpu([]),
+            {"info_available": True, "adapters": []},
+        )
+
+    def test_backend_non_disponibile(self):
+        self.assertEqual(
+            self._gpu(GpuNonDisponibile("x")),
+            {"info_available": False, "adapters": []},
+        )
+
+    def test_backend_eccezione_generica(self):
+        self.assertEqual(
+            self._gpu(OSError(5, "Accesso negato", r"C:\Users\Secret\dxgi.dll")),
+            {"info_available": False, "adapters": []},
+        )
+
+    def test_backend_elemento_malformato_tutto_o_niente(self):
+        self.assertEqual(
+            self._gpu([_GPU_FINTA, ("tupla", 1)]),
+            {"info_available": False, "adapters": []},
+        )
+
+    def test_nome_ripulito(self):
+        gpu = self._gpu([AdattatoreGrafico("   Example GPU  \t", 1)])
+        self.assertEqual(gpu["adapters"][0]["name"], "Example GPU")
+
+    def test_nomi_non_validi_diventano_none(self):
+        for nome in ("", "    ", None, 123, b"Example GPU", "Example\x07GPU", "\x1b[31mGPU"):
+            with self.subTest(nome=nome):
+                gpu = self._gpu([AdattatoreGrafico(nome, 8 * _GIB)])
+                self.assertTrue(gpu["info_available"])
+                self.assertIsNone(gpu["adapters"][0]["name"])
+                self.assertEqual(gpu["adapters"][0]["dedicated_memory_bytes"], 8 * _GIB)
+
+    def test_otto_gib_raw(self):
+        gpu = self._gpu([AdattatoreGrafico("Example GPU", 8_589_934_592)])
+        valore = gpu["adapters"][0]["dedicated_memory_bytes"]
+        self.assertEqual(valore, 8_589_934_592)
+        self.assertIs(type(valore), int)
+
+    def test_sedici_gib_raw(self):
+        gpu = self._gpu([AdattatoreGrafico("Example GPU", 17_179_869_184)])
+        self.assertEqual(gpu["adapters"][0]["dedicated_memory_bytes"], 17_179_869_184)
+
+    def test_valore_di_sistema_non_arrotondato(self):
+        # Come riportato dal sistema (es. al netto della memoria riservata):
+        # nessuna correzione verso la capacità nominale.
+        gpu = self._gpu([AdattatoreGrafico("Example GPU", 8_413_773_824)])
+        self.assertEqual(gpu["adapters"][0]["dedicated_memory_bytes"], 8_413_773_824)
+
+    def test_zero_byte_resta_zero(self):
+        gpu = self._gpu([AdattatoreGrafico("Example GPU", 0)])
+        valore = gpu["adapters"][0]["dedicated_memory_bytes"]
+        self.assertEqual(valore, 0)
+        self.assertIsNotNone(valore)
+
+    def test_memoria_non_valida_diventa_none(self):
+        for memoria in (None, -1, True, False, 8.0 * _GIB, float("nan"), "8589934592"):
+            with self.subTest(memoria=memoria):
+                gpu = self._gpu([AdattatoreGrafico("Example GPU", memoria)])
+                self.assertTrue(gpu["info_available"])
+                self.assertEqual(gpu["adapters"][0]["name"], "Example GPU")
+                self.assertIsNone(gpu["adapters"][0]["dedicated_memory_bytes"])
+
+
+class TestGpuPartialSuccess(unittest.TestCase):
+
+    def test_gpu_fallisce_resto_intatto(self):
+        riferimento = _esegui_get_system_info()["data"]
+        risultato = _esegui_get_system_info(gpu=RuntimeError("x"))
+        data = risultato["data"]
+
+        self.assertTrue(risultato["ok"])
+        self.assertEqual(data["gpu"], {"info_available": False, "adapters": []})
+        for campo in CAMPI_ATTESI_SYSTEM_INFO - {"gpu"}:
+            self.assertEqual(data[campo], riferimento[campo], msg=campo)
+
+    def test_psutil_assente_gpu_intatta(self):
+        data = _esegui_get_system_info(psutil_finto=None)["data"]
+        self.assertEqual(
+            data["gpu"],
+            {
+                "info_available": True,
+                "adapters": [
+                    {"name": _GPU_FINTA.name, "dedicated_memory_bytes": 8 * _GIB},
+                ],
+            },
+        )
+
+    def test_tutto_fallisce_gpu_compresa_schema_completo(self):
+        risultato = _esegui_get_system_info(
+            psutil_finto=_PsutilSystemInfoFinto(
+                fisici=RuntimeError("a"),
+                logici=RuntimeError("b"),
+                uso=RuntimeError("c"),
+                memoria=RuntimeError("d"),
+                avvio=RuntimeError("e"),
+            ),
+            winreg_finto=_WinregFinto(errore_apertura=OSError("f")),
+            processor=RuntimeError("g"),
+            gpu=RuntimeError("h"),
+        )
+
+        self.assertTrue(risultato["ok"])
+        self.assertEqual(set(risultato["data"].keys()), CAMPI_ATTESI_SYSTEM_INFO)
+        self.assertEqual(
+            risultato["data"]["gpu"],
+            {"info_available": False, "adapters": []},
+        )
+
+
+class TestContrattoGpu(unittest.TestCase):
+
+    def _tutti_i_casi(self):
+        return [
+            _esegui_get_system_info(),
+            _esegui_get_system_info(gpu=[]),
+            _esegui_get_system_info(gpu=GpuNonDisponibile("x")),
+            _esegui_get_system_info(gpu=[
+                AdattatoreGrafico("Example Integrated", 0),
+                AdattatoreGrafico(None, None),
+            ]),
+        ]
+
+    def test_schema_esatto(self):
+        for risultato in self._tutti_i_casi():
+            gpu = risultato["data"]["gpu"]
+            self.assertEqual(set(gpu.keys()), CAMPI_ATTESI_GPU)
+            self.assertIs(type(gpu["info_available"]), bool)
+            self.assertIs(type(gpu["adapters"]), list)
+            for adattatore in gpu["adapters"]:
+                self.assertEqual(set(adattatore.keys()), CAMPI_ATTESI_ADAPTER)
+
+    def test_non_disponibile_implica_lista_vuota(self):
+        for risultato in self._tutti_i_casi():
+            gpu = risultato["data"]["gpu"]
+            if not gpu["info_available"]:
+                self.assertEqual(gpu["adapters"], [])
+
+    def test_mai_gpu_null(self):
+        for risultato in self._tutti_i_casi():
+            self.assertIsInstance(risultato["data"]["gpu"], dict)
+
+    def test_json_serializzabile(self):
+        for risultato in self._tutti_i_casi():
+            json.dumps(risultato, allow_nan=False)
+
+    def test_nessuna_chiave_sensibile(self):
+        for risultato in self._tutti_i_casi():
+            self.assertEqual(
+                _tutte_le_chiavi(risultato["data"]) & CHIAVI_VIETATE,
+                set(),
+            )
+
+    def test_nessuna_unita_umanizzata(self):
+        for risultato in self._tutti_i_casi():
+            for adattatore in risultato["data"]["gpu"]["adapters"]:
+                self.assertNotIsInstance(adattatore["dedicated_memory_bytes"], str)
+            serializzato = json.dumps(risultato["data"]["gpu"], ensure_ascii=False)
+            for unita in ("GB", "GiB", "MB", "MiB"):
+                self.assertNotIn(unita, serializzato)
+
+    def test_testo_eccezione_mai_nel_risultato(self):
+        segreto = r"C:\Users\Secret\System32\dxgi.dll"
+        risultato = _esegui_get_system_info(gpu=OSError(126, "Modulo non trovato", segreto))
+        serializzato = json.dumps(risultato, ensure_ascii=False)
+
+        self.assertNotIn("Secret", serializzato)
+        self.assertNotIn("Modulo non trovato", serializzato)
+        self.assertNotIn("dxgi", serializzato)
+
+
+class TestDescrizioneGetSystemInfo(unittest.TestCase):
+
+    def setUp(self):
+        self.descrizione = _schema_per_nome("get_system_info")["function"]["description"]
+
+    def test_copre_i_dati_restituiti(self):
+        for parola in ("sistema operativo", "CPU", "core", "thread", "RAM", "uptime", "GPU", "VRAM dedicata totale"):
+            self.assertIn(parola, self.descrizione, msg=parola)
+
+    def test_nessuna_metrica_gpu_non_disponibile(self):
+        testo = self.descrizione.lower()
+        for vietato in ("temperatura", "usata", "libera", "utilizzo gpu", "carico"):
+            self.assertNotIn(vietato, testo, msg=vietato)
+
+    def test_nessun_riferimento_legacy_cpu_logiche(self):
+        self.assertNotIn("CPU logiche", self.descrizione)
+
+
+# =====================================================================
 # Fallback deterministico del dominio system
 # =====================================================================
 
-def _risultato_system_info(cpu=None, memory=None, uptime_seconds=86_400, **os_campi):
+def _risultato_system_info(
+    cpu=None,
+    memory=None,
+    uptime_seconds=86_400,
+    gpu=_PREDEFINITO,
+    **os_campi,
+):
+    if gpu is _PREDEFINITO:
+        gpu = {
+            "info_available": True,
+            "adapters": [
+                {"name": "Example Graphics Adapter", "dedicated_memory_bytes": 8 * _GIB},
+            ],
+        }
+
     data = {
         "os_name": "Windows",
         "os_release": "11",
@@ -1229,6 +1548,7 @@ def _risultato_system_info(cpu=None, memory=None, uptime_seconds=86_400, **os_ca
             "used_bytes": 20 * 1024 ** 3,
             "usage_percent": 62.5,
         },
+        "gpu": gpu,
         "uptime_seconds": uptime_seconds,
     }
     data.update(os_campi)
@@ -1420,6 +1740,111 @@ class TestFallbackDeterministicoSistema(unittest.TestCase):
         self.assertNotIn("Sistema operativo", testo)
         self.assertNotIn("Spazio totale", testo)
         self.assertNotIn("qualcosa", testo)
+
+
+class TestFallbackGpu(unittest.TestCase):
+
+    def _testo(self, gpu=_PREDEFINITO):
+        return fallback_deterministico_sistema(_risultato_system_info(gpu=gpu))
+
+    def _righe_gpu(self, testo):
+        return [riga for riga in testo.splitlines() if riga.startswith("Scheda video")]
+
+    def test_una_gpu(self):
+        self.assertEqual(
+            self._righe_gpu(self._testo()),
+            ["Scheda video: Example Graphics Adapter (VRAM dedicata: 8.00 GiB)"],
+        )
+
+    def test_valore_di_sistema_formattato_senza_correzioni(self):
+        testo = self._testo({
+            "info_available": True,
+            "adapters": [{"name": "Example GPU", "dedicated_memory_bytes": 8_413_773_824}],
+        })
+        self.assertIn("Scheda video: Example GPU (VRAM dedicata: 7.84 GiB)", testo)
+
+    def test_piu_adapter_una_riga_ciascuno_in_ordine(self):
+        testo = self._testo({
+            "info_available": True,
+            "adapters": [
+                {"name": "Example Integrated", "dedicated_memory_bytes": 128 * 1024 ** 2},
+                {"name": "Example Discrete", "dedicated_memory_bytes": 16 * _GIB},
+            ],
+        })
+        self.assertEqual(
+            self._righe_gpu(testo),
+            [
+                "Scheda video: Example Integrated (VRAM dedicata: 0.12 GiB)",
+                "Scheda video: Example Discrete (VRAM dedicata: 16.00 GiB)",
+            ],
+        )
+
+    def test_zero_adapter_hardware(self):
+        self.assertEqual(
+            self._righe_gpu(self._testo({"info_available": True, "adapters": []})),
+            ["Scheda video: nessun adattatore grafico hardware segnalato dal sistema"],
+        )
+
+    def test_non_disponibile(self):
+        self.assertEqual(
+            self._righe_gpu(self._testo({"info_available": False, "adapters": []})),
+            ["Scheda video: non disponibile"],
+        )
+
+    def test_blocco_gpu_assente_o_malformato(self):
+        for gpu in (None, "x", [], {}, {"info_available": "true", "adapters": []},
+                    {"info_available": True, "adapters": None}):
+            with self.subTest(gpu=gpu):
+                self.assertEqual(
+                    self._righe_gpu(self._testo(gpu)),
+                    ["Scheda video: non disponibile"],
+                )
+
+    def test_chiave_gpu_mancante(self):
+        risultato_tool = _risultato_system_info()
+        del risultato_tool["data"]["gpu"]
+        testo = fallback_deterministico_sistema(risultato_tool)
+        self.assertIn("Scheda video: non disponibile", testo)
+
+    def test_nome_e_byte_mancanti_mai_none(self):
+        testo = self._testo({
+            "info_available": True,
+            "adapters": [
+                {"name": None, "dedicated_memory_bytes": None},
+                "non un dict",
+            ],
+        })
+        self.assertEqual(
+            self._righe_gpu(testo),
+            [
+                "Scheda video: non disponibile (VRAM dedicata: non disponibile)",
+                "Scheda video: non disponibile (VRAM dedicata: non disponibile)",
+            ],
+        )
+        self.assertNotIn("None", testo)
+
+    def test_zero_byte(self):
+        testo = self._testo({
+            "info_available": True,
+            "adapters": [{"name": "Example GPU", "dedicated_memory_bytes": 0}],
+        })
+        self.assertIn("Scheda video: Example GPU (VRAM dedicata: 0.00 GiB)", testo)
+
+    def test_nessuna_parola_memoria(self):
+        for gpu in (
+            _PREDEFINITO,
+            {"info_available": True, "adapters": []},
+            {"info_available": False, "adapters": []},
+        ):
+            testo = self._testo(gpu)
+            self.assertNotIn("memoria", testo.lower())
+            self.assertNotIn("ricordo", testo.lower())
+
+    def test_resto_del_fallback_invariato(self):
+        testo = self._testo({"info_available": False, "adapters": []})
+        self.assertIn("RAM in uso: 20.00 GiB (62.5%)", testo)
+        self.assertIn("Acceso da: 1 g, 0 h, 0 min", testo)
+        self.assertIn("Python: 3.12.4", testo)
 
 
 # =====================================================================
