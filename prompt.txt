@@ -214,6 +214,7 @@ Disambiguazioni per get_disk_usage:
 - "Cos'è lo spazio su disco?" -> domanda teorica -> nessun tool
 - "Quanto spazio occupa una RTX 5090?" -> conoscenza generale, non è lo stato del PC corrente -> nessun tool
 - "Quanto spazio occupa la cartella Aster?" -> NON usare get_disk_usage: questo tool conosce solo lo spazio del filesystem, non la dimensione di una cartella specifica
+- "Quali unità ho?" / "Spazio libero su ciascuna unità?" / "Quale unità è più piena?" -> list_local_volumes, anche se l'utente dice "dischi" al plurale (get_disk_usage resta per il solo disco dove gira Aster); non copre unità che Windows classifica come rete, rimovibili (spesso le chiavette) o ottiche.
 
 Quando l'utente chiede quali programmi o processi sono in esecuzione ADESSO sul computer, usa list_processes. Esempi:
 - "Che programmi sono aperti?" / "Quali processi stanno girando?" -> richiesta generale -> ometti name

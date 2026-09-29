@@ -34,6 +34,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
@@ -47,7 +48,13 @@ from modules.system_tools import (
     fallback_deterministico_sistema,
     get_disk_usage,
     get_system_info,
+    list_local_volumes,
     registra_tool_sistema,
+)
+from modules.volume_info import (
+    EnumerazioneNonRiuscita,
+    PiattaformaNonSupportata,
+    RisultatoVolumi,
 )
 from modules.tool_registry import RegistroStrumenti, crea_registro_memoria
 from modules.tool_response import genera_risposta_post_tool
@@ -167,11 +174,17 @@ class ContatoreChiamate:
 
 class TestToolsSistemaElenco(unittest.TestCase):
 
-    def test_contiene_esattamente_tre_schemi(self):
+    def test_contiene_esattamente_quattro_schemi(self):
         nomi = {schema["function"]["name"] for schema in TOOLS_SISTEMA}
         self.assertEqual(
             nomi,
-            {"get_system_info", "get_disk_usage", "list_processes"},
+            {"get_system_info", "get_disk_usage", "list_processes", "list_local_volumes"},
+        )
+
+    def test_ordine_schemi_esistenti_invariato(self):
+        self.assertEqual(
+            [schema["function"]["name"] for schema in TOOLS_SISTEMA],
+            ["get_system_info", "get_disk_usage", "list_processes", "list_local_volumes"],
         )
 
 
@@ -250,7 +263,8 @@ class TestRegistrazioneSistema(unittest.TestCase):
         self.assertIn("get_system_info", nomi)
         self.assertIn("get_disk_usage", nomi)
         self.assertIn("list_processes", nomi)
-        self.assertEqual(len(nomi), 10)
+        self.assertIn("list_local_volumes", nomi)
+        self.assertEqual(len(nomi), 11)
 
     def test_nessun_tool_memoria_alterato(self):
         for nome in (
@@ -2214,13 +2228,13 @@ class TestRegistrazioneListProcesses(unittest.TestCase):
         self.assertEqual(tool_spec.livello, "READ_ONLY")
         self.assertIs(tool_spec.handler, system_tools.list_processes)
 
-    def test_memoria_piu_sistema_dieci(self):
+    def test_memoria_piu_sistema_undici(self):
         registro = crea_registro_memoria()
         registra_tool_sistema(registro)
         nomi = {s["function"]["name"] for s in registro.elenco_schema()}
-        self.assertEqual(len(nomi), 10)
+        self.assertEqual(len(nomi), 11)
 
-    def test_registro_completo_dodici(self):
+    def test_registro_completo_tredici(self):
         from modules.file_tools import registra_tool_filesystem
 
         registro = crea_registro_memoria()
@@ -2228,7 +2242,7 @@ class TestRegistrazioneListProcesses(unittest.TestCase):
         registra_tool_filesystem(registro)
         nomi = {s["function"]["name"] for s in registro.elenco_schema()}
 
-        self.assertEqual(len(nomi), 12)
+        self.assertEqual(len(nomi), 13)
         self.assertTrue(self.NOMI_MEMORIA.issubset(nomi))
 
         domini = {}
@@ -2239,7 +2253,7 @@ class TestRegistrazioneListProcesses(unittest.TestCase):
         self.assertEqual(domini["memory"], self.NOMI_MEMORIA)
         self.assertEqual(
             domini["system"],
-            {"get_system_info", "get_disk_usage", "list_processes"},
+            {"get_system_info", "get_disk_usage", "list_processes", "list_local_volumes"},
         )
         self.assertEqual(domini["filesystem"], {"list_directory", "read_file"})
 
@@ -2775,6 +2789,438 @@ class TestListProcessesSmokeReale(unittest.TestCase):
         pid_restituiti = {p["pid"] for p in risultato["data"]["processes"]}
         if not risultato["data"]["truncated"]:
             self.assertIn(os.getpid(), pid_restituiti)
+
+
+# =====================================================================
+# 0.7.2c - list_local_volumes (backend volume_info sempre finto qui:
+# il backend reale è coperto da tests/test_volume_info.py)
+# =====================================================================
+
+_TIB = 1024 ** 4
+
+# La lettera di unità è un dato ammesso di questo tool: "drive" esce
+# dalle chiavi vietate generiche; restano vietati label, filesystem,
+# seriali, GUID, UNC e device path.
+CHIAVI_VIETATE_VOLUMI = (CHIAVI_VIETATE - {"drive"}) | {
+    "label",
+    "volume_label",
+    "filesystem",
+    "file_system",
+    "fstype",
+    "volume_serial",
+    "volume_guid",
+    "unc",
+    "device",
+    "device_path",
+    "root",
+}
+
+CAMPI_ATTESI_VOLUME = {
+    "drive",
+    "info_available",
+    "total_bytes",
+    "used_bytes",
+    "free_bytes",
+    "used_percent",
+}
+
+
+def _volume(lettera, totale=2 * _TIB, libero=575 * _GIB):
+    usato = totale - libero
+    return {
+        "drive": f"{lettera}:",
+        "info_available": True,
+        "total_bytes": totale,
+        "used_bytes": usato,
+        "free_bytes": libero,
+        "used_percent": usato * 100 // totale,
+    }
+
+
+def _volume_illeggibile(lettera):
+    return {
+        "drive": f"{lettera}:",
+        "info_available": False,
+        "total_bytes": None,
+        "used_bytes": None,
+        "free_bytes": None,
+        "used_percent": None,
+    }
+
+
+def _esegui_list_local_volumes(risultato=None, eccezione=None, argomenti=None):
+    """Handler con backend volume_info finto: risultato da restituire o eccezione da sollevare."""
+
+    chiamate = []
+
+    def leggi_finto():
+        chiamate.append(1)
+        if eccezione is not None:
+            raise eccezione
+        return risultato
+
+    with mock.patch.object(system_tools.volume_info, "leggi_volumi_locali", leggi_finto):
+        esito = list_local_volumes({} if argomenti is None else argomenti, None)
+    return esito, chiamate
+
+
+def _risultato_volumi(volumi, totale=None, troncato=False, piu_piena=None):
+    return {
+        "ok": True,
+        "operation": "list_local_volumes",
+        "status": "success",
+        "data": {
+            "scope": "local_fixed_volumes",
+            "volumes": volumi,
+            "total": len(volumi) if totale is None else totale,
+            "truncated": troncato,
+            "fullest_drive": piu_piena,
+        },
+    }
+
+
+def _volume_percento(lettera, percento):
+    """Volume da 1000 byte con used_percent esatto (per i casi di fullest_drive)."""
+
+    return _volume(lettera, totale=1000, libero=1000 - percento * 10)
+
+
+class TestSchemaListLocalVolumes(unittest.TestCase):
+
+    def setUp(self):
+        self.schema = _schema_per_nome("list_local_volumes")
+
+    def test_schema_valido(self):
+        self.assertEqual(self.schema["type"], "function")
+        self.assertEqual(self.schema["function"]["name"], "list_local_volumes")
+
+    def test_input_schema_vuoto(self):
+        self.assertEqual(
+            self.schema["function"]["parameters"],
+            {"type": "object", "properties": {}, "required": []},
+        )
+
+    def test_descrizione_senza_promesse_su_dischi_interni_o_usb(self):
+        descrizione = self.schema["function"]["description"]
+        self.assertIn("unità locali fisse", descrizione)
+        for classe in ("rete", "rimovibili", "ottiche", "RAM disk"):
+            self.assertIn(classe, descrizione, msg=classe)
+        for vietato in ("intern", "USB", "fisic"):
+            self.assertNotIn(vietato, descrizione, msg=vietato)
+
+    def test_schema_get_disk_usage_invariato(self):
+        schema = _schema_per_nome("get_disk_usage")
+        self.assertEqual(
+            schema["function"]["parameters"],
+            {"type": "object", "properties": {}, "required": []},
+        )
+        self.assertIn("filesystem che contiene realmente", schema["function"]["description"])
+
+
+class TestRegistrazioneListLocalVolumes(unittest.TestCase):
+
+    def test_dominio_livello_handler(self):
+        registro = crea_registro_memoria()
+        registra_tool_sistema(registro)
+        tool_spec = registro.trova("list_local_volumes")
+
+        self.assertIsNotNone(tool_spec)
+        self.assertEqual(tool_spec.dominio, "system")
+        self.assertEqual(tool_spec.livello, "READ_ONLY")
+        self.assertIs(tool_spec.handler, system_tools.list_local_volumes)
+
+
+class TestHandlerListLocalVolumes(unittest.TestCase):
+
+    def test_successo_schema_esatto(self):
+        volumi = [_volume("C"), _volume("D", 4 * _TIB, 1 * _TIB)]
+        esito, _ = _esegui_list_local_volumes(RisultatoVolumi(volumi, 2, False))
+
+        # C: 71% usato, D: 75% usato.
+        self.assertEqual(esito, _risultato_volumi(volumi, piu_piena="D:"))
+        self.assertEqual(set(esito), {"ok", "operation", "status", "data"})
+        self.assertEqual(
+            set(esito["data"]),
+            {"scope", "volumes", "total", "truncated", "fullest_drive"},
+        )
+        for volume in esito["data"]["volumes"]:
+            self.assertEqual(set(volume), CAMPI_ATTESI_VOLUME)
+
+    def test_lista_vuota(self):
+        esito, _ = _esegui_list_local_volumes(RisultatoVolumi([], 0, False))
+        self.assertEqual(esito, _risultato_volumi([]))
+
+    def test_piattaforma_non_supportata(self):
+        esito, _ = _esegui_list_local_volumes(eccezione=PiattaformaNonSupportata("x"))
+        self.assertEqual(
+            esito,
+            {
+                "ok": False,
+                "operation": "list_local_volumes",
+                "status": "unsupported_platform",
+                "error": "L'elenco delle unità locali è disponibile solo su Windows.",
+            },
+        )
+
+    def test_enumerazione_fallita_tool_error(self):
+        for eccezione in (EnumerazioneNonRiuscita("x"), OSError(5, "Accesso negato"), RuntimeError("y")):
+            with self.subTest(eccezione=type(eccezione).__name__):
+                esito, _ = _esegui_list_local_volumes(eccezione=eccezione)
+                self.assertEqual(
+                    esito,
+                    {
+                        "ok": False,
+                        "operation": "list_local_volumes",
+                        "status": "tool_error",
+                        "error": "Non sono riuscito a elencare le unità locali.",
+                    },
+                )
+
+    def test_nessuna_eccezione_raw(self):
+        segreto = r"\\server\Secret\C:\Users\Secret"
+        for eccezione in (OSError(21, "Il dispositivo non è pronto", segreto),
+                          PiattaformaNonSupportata(segreto)):
+            with self.subTest(eccezione=type(eccezione).__name__):
+                esito, _ = _esegui_list_local_volumes(eccezione=eccezione)
+                serializzato = json.dumps(esito, ensure_ascii=False)
+                self.assertNotIn("Secret", serializzato)
+                self.assertNotIn("non è pronto", serializzato)
+
+    def test_successo_parziale_volume_illeggibile(self):
+        volumi = [_volume("C"), _volume_illeggibile("E")]
+        esito, _ = _esegui_list_local_volumes(RisultatoVolumi(volumi, 2, False))
+
+        self.assertTrue(esito["ok"])
+        self.assertEqual(esito["status"], "success")
+        self.assertEqual(esito["data"]["volumes"][1], _volume_illeggibile("E"))
+        self.assertEqual(esito["data"]["total"], 2)
+
+    def test_troncato(self):
+        volumi = [_volume(lettera) for lettera in "CDEFGHIJ"]
+        esito, _ = _esegui_list_local_volumes(RisultatoVolumi(volumi, 11, True))
+
+        self.assertEqual(len(esito["data"]["volumes"]), 8)
+        self.assertEqual(esito["data"]["total"], 11)
+        self.assertTrue(esito["data"]["truncated"])
+
+    def test_argomenti_ignorati_nessun_path_dal_modello(self):
+        esito, chiamate = _esegui_list_local_volumes(
+            RisultatoVolumi([_volume("C")], 1, False),
+            argomenti={"drive": "Z:", "path": r"C:\Users"},
+        )
+        self.assertEqual(esito, _risultato_volumi([_volume("C")], piu_piena="C:"))
+        self.assertEqual(len(chiamate), 1)
+
+    def test_json_serializzabile_senza_nan(self):
+        casi = [
+            _esegui_list_local_volumes(RisultatoVolumi([_volume("C"), _volume_illeggibile("D")], 2, False))[0],
+            _esegui_list_local_volumes(RisultatoVolumi([], 0, False))[0],
+            _esegui_list_local_volumes(eccezione=PiattaformaNonSupportata("x"))[0],
+            _esegui_list_local_volumes(eccezione=RuntimeError("x"))[0],
+        ]
+        for esito in casi:
+            json.dumps(esito, allow_nan=False)
+
+    def test_nessuna_chiave_privacy_vietata(self):
+        esito, _ = _esegui_list_local_volumes(
+            RisultatoVolumi([_volume("C"), _volume_illeggibile("D")], 2, False)
+        )
+        self.assertEqual(_tutte_le_chiavi(esito) & CHIAVI_VIETATE_VOLUMI, set())
+
+    def test_nessuna_unita_umanizzata_nel_dato(self):
+        esito, _ = _esegui_list_local_volumes(RisultatoVolumi([_volume("C")], 1, False))
+        serializzato = json.dumps(esito["data"], ensure_ascii=False)
+        for unita in ("GB", "GiB", "TB", "TiB"):
+            self.assertNotIn(unita, serializzato)
+
+
+class TestFullestDriveListLocalVolumes(unittest.TestCase):
+    """fullest_drive calcolato da Python: used_percent più alto, mai scelto tra i soli primi 8."""
+
+    def _piu_piena(self, volumi, totale=None, troncato=False):
+        totale = len(volumi) if totale is None else totale
+        esito, _ = _esegui_list_local_volumes(RisultatoVolumi(volumi, totale, troncato))
+        self.assertTrue(esito["ok"])
+        return esito["data"]["fullest_drive"]
+
+    def test_a_percentuale_non_byte_assoluti(self):
+        # Caso reale: D: ha più byte usati ma C: ha la percentuale più alta.
+        volumi = [
+            _volume("C", 1_998_880_501_760, 613_242_990_592),
+            _volume("D", 4_000_768_323_584, 1_482_278_846_464),
+        ]
+        self.assertEqual([v["used_percent"] for v in volumi], [69, 62])
+        self.assertLess(volumi[0]["used_bytes"], volumi[1]["used_bytes"])
+        self.assertEqual(self._piu_piena(volumi), "C:")
+
+    def test_b_seconda_unita_piu_piena(self):
+        self.assertEqual(self._piu_piena([_volume_percento("C", 40), _volume_percento("D", 85)]), "D:")
+
+    def test_c_parita_vince_la_prima_a_z(self):
+        self.assertEqual(self._piu_piena([_volume_percento("C", 69), _volume_percento("D", 69)]), "C:")
+
+    def test_d_illeggibile_ignorata(self):
+        self.assertEqual(self._piu_piena([_volume_illeggibile("C"), _volume_percento("D", 62)]), "D:")
+
+    def test_e_tutte_illeggibili(self):
+        self.assertIsNone(self._piu_piena([_volume_illeggibile("C"), _volume_illeggibile("D")]))
+
+    def test_f_lista_vuota(self):
+        self.assertIsNone(self._piu_piena([]))
+
+    def test_g_troncato_null(self):
+        volumi = [_volume_percento(lettera, 10) for lettera in "CDEFGHIJ"]
+        volumi[3] = _volume_percento("F", 99)
+        self.assertIsNone(self._piu_piena(volumi, totale=11, troncato=True))
+
+    def test_h_un_solo_volume_valido(self):
+        self.assertEqual(self._piu_piena([_volume_percento("E", 5)]), "E:")
+
+    def test_volumi_non_riordinati(self):
+        volumi = [_volume_percento("C", 10), _volume_percento("D", 90), _volume_percento("E", 50)]
+        esito, _ = _esegui_list_local_volumes(RisultatoVolumi(volumi, 3, False))
+
+        self.assertEqual([v["drive"] for v in esito["data"]["volumes"]], ["C:", "D:", "E:"])
+        self.assertEqual(esito["data"]["fullest_drive"], "D:")
+
+    def test_contratto_esatto_con_fullest_drive(self):
+        volumi = [_volume_percento("C", 69), _volume_percento("D", 62)]
+        esito, _ = _esegui_list_local_volumes(RisultatoVolumi(volumi, 2, False))
+        self.assertEqual(esito, _risultato_volumi(volumi, piu_piena="C:"))
+        json.dumps(esito, allow_nan=False)
+
+    def test_errori_senza_fullest_drive(self):
+        for eccezione in (PiattaformaNonSupportata("x"), EnumerazioneNonRiuscita("y")):
+            with self.subTest(eccezione=type(eccezione).__name__):
+                esito, _ = _esegui_list_local_volumes(eccezione=eccezione)
+                self.assertNotIn("data", esito)
+                self.assertNotIn("fullest_drive", json.dumps(esito))
+
+
+class TestFallbackListLocalVolumes(unittest.TestCase):
+
+    def _righe(self, risultato_tool):
+        return fallback_deterministico_sistema(risultato_tool).splitlines()
+
+    def test_volume_leggibile(self):
+        righe = self._righe(_risultato_volumi([_volume("C")]))
+        self.assertEqual(
+            righe,
+            [
+                "Unità locali fisse secondo Windows: 1",
+                "- C: 2.00 TiB totali, 575.00 GiB liberi (71% usato)",
+            ],
+        )
+
+    def test_volume_illeggibile(self):
+        righe = self._righe(_risultato_volumi([_volume("C"), _volume_illeggibile("E")]))
+        self.assertEqual(righe[-1], "- E: spazio non leggibile")
+
+    def test_lista_vuota(self):
+        self.assertEqual(
+            fallback_deterministico_sistema(_risultato_volumi([])),
+            "Windows non segnala unità locali fisse con lettera.",
+        )
+
+    def test_piattaforma_non_supportata(self):
+        esito, _ = _esegui_list_local_volumes(eccezione=PiattaformaNonSupportata("x"))
+        self.assertEqual(
+            fallback_deterministico_sistema(esito),
+            "L'elenco delle unità locali è disponibile solo su Windows.",
+        )
+
+    def test_errore_globale(self):
+        esito, _ = _esegui_list_local_volumes(eccezione=RuntimeError("x"))
+        self.assertEqual(
+            fallback_deterministico_sistema(esito),
+            "Non sono riuscito a elencare le unità locali.",
+        )
+
+    def test_errori_senza_messaggio(self):
+        for status, atteso in (
+            ("unsupported_platform", "L'elenco delle unità locali è disponibile solo su Windows."),
+            ("tool_error", "Non sono riuscito a elencare le unità locali."),
+        ):
+            with self.subTest(status=status):
+                testo = fallback_deterministico_sistema(
+                    {"ok": False, "operation": "list_local_volumes", "status": status}
+                )
+                self.assertEqual(testo, atteso)
+
+    def test_troncato(self):
+        volumi = [_volume(lettera) for lettera in "CDEFGHIJ"]
+        righe = self._righe(_risultato_volumi(volumi, totale=11, troncato=True))
+
+        self.assertEqual(righe[0], "Unità locali fisse secondo Windows: 11")
+        self.assertEqual(righe[-1], "Elenco parziale: mostrate 8 unità su 11.")
+
+    def test_non_troncato_senza_frase_parziale(self):
+        testo = fallback_deterministico_sistema(_risultato_volumi([_volume("C")]))
+        self.assertNotIn("parziale", testo)
+
+    def test_dati_malformati_mai_none(self):
+        casi = [
+            {**_volume("C"), "used_percent": True},
+            {**_volume("C"), "used_percent": 101},
+            {**_volume("C"), "total_bytes": 0},
+            {**_volume("C"), "free_bytes": None},
+            {**_volume("C"), "info_available": "true"},
+            "non un dict",
+        ]
+        for volume in casi:
+            with self.subTest(volume=volume):
+                testo = fallback_deterministico_sistema(_risultato_volumi([volume]))
+                self.assertIn("spazio non leggibile", testo)
+                self.assertNotIn("None", testo)
+
+    def test_lettera_mancante_mai_none(self):
+        testo = fallback_deterministico_sistema(_risultato_volumi([{**_volume("C"), "drive": None}]))
+        self.assertIn("- Unità sconosciuta 2.00 TiB totali", testo)
+        self.assertNotIn("None", testo)
+
+    def test_data_o_volumi_non_validi(self):
+        for data in (None, "x", {"volumes": None}, {"volumes": "x"}):
+            with self.subTest(data=data):
+                testo = fallback_deterministico_sistema(
+                    {"ok": True, "operation": "list_local_volumes", "status": "success", "data": data}
+                )
+                self.assertEqual(testo, "Windows non segnala unità locali fisse con lettera.")
+
+    def test_nessuna_promessa_di_disco_interno(self):
+        testo = fallback_deterministico_sistema(_risultato_volumi([_volume("C")]))
+        self.assertNotIn("intern", testo)
+        self.assertNotIn("fisic", testo)
+
+    def test_router_non_usa_il_fallback_generico(self):
+        testo = fallback_deterministico_sistema(_risultato_volumi([_volume("C")]))
+        self.assertNotIn("Non sono riuscito a generare una risposta", testo)
+
+
+class TestPipelinePostToolListLocalVolumes(unittest.TestCase):
+
+    def test_secondo_giro_fallito_usa_fallback_volumi(self):
+        risultato_tool = _risultato_volumi([_volume("C"), _volume_illeggibile("D")])
+
+        def esegui_risposta_finale_fallisce(*args, **kwargs):
+            raise ConnectionError("Ollama non raggiungibile")
+
+        originale = tool_response.esegui_risposta_finale
+        tool_response.esegui_risposta_finale = esegui_risposta_finale_fallisce
+        try:
+            risposta = genera_risposta_post_tool(
+                modello="qwen3:8b",
+                messaggi=[],
+                host_ollama="http://localhost:11434",
+                timeout_ollama=60,
+                risultato_tool=risultato_tool,
+                salta_secondo_giro=False,
+                fallback_deterministico=fallback_deterministico_sistema,
+            )
+        finally:
+            tool_response.esegui_risposta_finale = originale
+
+        self.assertIn("- C: 2.00 TiB totali", risposta)
+        self.assertIn("- D: spazio non leggibile", risposta)
 
 
 if __name__ == "__main__":

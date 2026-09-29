@@ -7,7 +7,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from modules import gpu_info
+from modules import gpu_info, volume_info
 from modules.tool_registry import RegistroStrumenti, ToolSpec
 
 # Import protetto: se psutil manca, Aster parte comunque; list_processes
@@ -41,6 +41,9 @@ _MAX_LUNGHEZZA_NOME_PROCESSO = 255
 _ERRORE_PSUTIL_ASSENTE = "Elenco processi non disponibile su questa installazione."
 _ERRORE_ENUMERAZIONE = "Non sono riuscito a leggere l'elenco dei processi."
 _ERRORE_FILTRO_NON_VALIDO = "Filtro nome non valido."
+
+_ERRORE_VOLUMI_NON_SUPPORTATI = "L'elenco delle unità locali è disponibile solo su Windows."
+_ERRORE_VOLUMI = "Non sono riuscito a elencare le unità locali."
 
 TOOLS_SISTEMA = [
     {
@@ -101,6 +104,22 @@ TOOLS_SISTEMA = [
                         ),
                     },
                 },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_local_volumes",
+            "description": (
+                "Spazio (byte e % usata) delle unità locali fisse con lettera "
+                "(C:, D:, ...). Esclude le unità che Windows classifica come "
+                "rete, rimovibili, ottiche o RAM disk. Nessun parametro."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
                 "required": [],
             },
         },
@@ -550,6 +569,56 @@ def list_processes(argomenti: dict, contesto) -> dict:
     }
 
 
+def _errore_list_local_volumes(status: str, messaggio: str) -> dict:
+    """Errore di list_local_volumes con messaggio fisso (mai testo di eccezioni)."""
+
+    return {
+        "ok": False,
+        "operation": "list_local_volumes",
+        "status": status,
+        "error": messaggio,
+    }
+
+
+def list_local_volumes(argomenti: dict, contesto) -> dict:
+    """
+    Handler del tool list_local_volumes.
+
+    Sola osservazione dello spazio delle unità che Windows classifica
+    DRIVE_FIXED (unità locale fissa secondo Windows, non necessariamente
+    un disco interno): nessun path dal modello, nessuna lettura di
+    file o directory, nessuna autorizzazione filesystem concessa.
+    Byte interi e percentuale usata troncata, già normalizzati da
+    volume_info; al massimo MAX_LOCAL_VOLUMES elementi, total conta
+    tutte le unità fisse. Una singola unità illeggibile resta in elenco
+    con info_available=False. fullest_drive (used_percent più alto,
+    calcolato da Python) è null se l'elenco è troncato, vuoto o senza
+    volumi leggibili. Piattaforma non Windows ->
+    unsupported_platform; enumerazione fallita -> tool_error; sempre
+    con messaggi fissi. Argomenti e contesto vengono ignorati.
+    """
+
+    try:
+        risultato = volume_info.leggi_volumi_locali()
+    except volume_info.PiattaformaNonSupportata:
+        return _errore_list_local_volumes("unsupported_platform", _ERRORE_VOLUMI_NON_SUPPORTATI)
+    except Exception:
+        return _errore_list_local_volumes("tool_error", _ERRORE_VOLUMI)
+
+    return {
+        "ok": True,
+        "operation": "list_local_volumes",
+        "status": "success",
+        "data": {
+            "scope": "local_fixed_volumes",
+            "volumes": risultato.volumi,
+            "total": risultato.totale,
+            "truncated": risultato.troncato,
+            "fullest_drive": volume_info.unita_piu_piena(risultato.volumi, risultato.troncato),
+        },
+    }
+
+
 _NON_DISPONIBILE = "non disponibile"
 
 
@@ -722,6 +791,67 @@ def _fallback_list_processes(risultato_tool: dict) -> str:
     return "\n".join(righe)
 
 
+def _riga_volume(volume) -> str:
+    """Riga del fallback per una singola unità (GiB/TiB solo nel testo, mai nel dato)."""
+
+    if not isinstance(volume, dict):
+        volume = {}
+
+    drive = volume.get("drive")
+    if not isinstance(drive, str) or not drive:
+        drive = "Unità sconosciuta"
+
+    totale = volume.get("total_bytes")
+    libero = volume.get("free_bytes")
+    percentuale = volume.get("used_percent")
+
+    leggibile = (
+        volume.get("info_available") is True
+        and _intero_positivo(totale) is not None
+        and _intero_non_negativo(libero) is not None
+        and _intero_non_negativo(percentuale) is not None
+        and percentuale <= 100
+    )
+    if not leggibile:
+        return f"- {drive} spazio non leggibile"
+
+    return (
+        f"- {drive} {_formatta_bytes(totale)} totali, "
+        f"{_formatta_bytes(libero)} liberi ({percentuale}% usato)"
+    )
+
+
+def _fallback_list_local_volumes(risultato_tool: dict) -> str:
+    """Fallback deterministico dedicato a list_local_volumes."""
+
+    status = risultato_tool.get("status")
+    if status == "unsupported_platform":
+        return risultato_tool.get("error") or _ERRORE_VOLUMI_NON_SUPPORTATI
+    if status != "success":
+        return risultato_tool.get("error") or _ERRORE_VOLUMI
+
+    data = risultato_tool.get("data")
+    data = data if isinstance(data, dict) else {}
+    volumi = data.get("volumes")
+    volumi = volumi if isinstance(volumi, list) else []
+    totale = _intero_non_negativo(data.get("total"))
+    if totale is None:
+        totale = len(volumi)
+
+    if not volumi:
+        return "Windows non segnala unità locali fisse con lettera."
+
+    righe = [f"Unità locali fisse secondo Windows: {totale}"]
+    righe.extend(_riga_volume(volume) for volume in volumi)
+
+    if data.get("truncated") is True:
+        righe.append(
+            f"Elenco parziale: mostrate {len(volumi)} unità su {totale}."
+        )
+
+    return "\n".join(righe)
+
+
 def fallback_deterministico_sistema(risultato_tool: dict) -> str:
     """
     Router del fallback deterministico per il dominio "system".
@@ -741,6 +871,9 @@ def fallback_deterministico_sistema(risultato_tool: dict) -> str:
 
     if operation == "list_processes":
         return _fallback_list_processes(risultato_tool)
+
+    if operation == "list_local_volumes":
+        return _fallback_list_local_volumes(risultato_tool)
 
     if risultato_tool.get("status") != "success":
         return (
@@ -779,6 +912,16 @@ def registra_tool_sistema(registro: RegistroStrumenti) -> None:
             nome="list_processes",
             schema=TOOLS_SISTEMA[2],
             handler=list_processes,
+            livello="READ_ONLY",
+            dominio="system",
+        )
+    )
+
+    registro.registra(
+        ToolSpec(
+            nome="list_local_volumes",
+            schema=TOOLS_SISTEMA[3],
+            handler=list_local_volumes,
             livello="READ_ONLY",
             dominio="system",
         )
