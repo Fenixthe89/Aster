@@ -575,20 +575,41 @@ _TOKEN_KEYWORD_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-_PIN_PATTERN = re.compile(
-    rf"\bPIN\b[^.\n]{{0,40}}?{_COPULA}\s*['\"]?(\d{{4,6}})\b",
-    re.IGNORECASE,
-)
+# Ramo "adiacente" per i soli valori numerici (PIN, CVV, OTP): tra
+# parola-chiave e valore solo spazi (newline compreso) e al più un
+# separatore semplice (: = # - – —), mai parole. Copre la forma compatta
+# "OTP 582913" che il modello produce riscrivendo la richiesta
+# dell'utente. Un numero senza parola-chiave non viene mai bloccato.
+_ADIACENTE = r"\s*(?:[:=#\-–—]\s*)?"
 
-_CVV_PATTERN = re.compile(
-    rf"\bCVV\b[^.\n]{{0,40}}?{_COPULA}\s*['\"]?(\d{{3,4}})\b",
-    re.IGNORECASE,
-)
 
-_OTP_PATTERN = re.compile(
-    r"\b(?:2FA|OTP|codice\s+di\s+verifica|codice\s+a\s+due\s+fattori)\b"
-    rf"[^.\n]{{0,40}}?{_COPULA}\s*['\"]?(\d{{4,8}})\b",
-    re.IGNORECASE,
+def _pattern_keyword_numero(keyword: str, valore: str) -> re.Pattern:
+    """
+    Parola-chiave seguita da un valore numerico, tramite il ramo storico
+    con copula (finestra di 40 caratteri, invariato) oppure tramite il
+    ramo adiacente.
+    """
+
+    return re.compile(
+        rf"\b(?:{keyword})\b"
+        rf"(?:[^.\n]{{0,40}}?{_COPULA}\s*|{_ADIACENTE})"
+        rf"['\"]?({valore})\b",
+        re.IGNORECASE,
+    )
+
+
+_PIN_PATTERN = _pattern_keyword_numero(r"PIN", r"\d{4,6}")
+
+_CVV_PATTERN = _pattern_keyword_numero(r"CVV", r"\d{3,4}")
+
+_OTP_PATTERN = _pattern_keyword_numero(
+    r"2FA|OTP"
+    r"|one[\s-]*time[\s-]*password"
+    r"|(?:codice|password)\s+monouso"
+    r"|codice\s+(?:di\s+)?verifica"
+    r"|verification\s+code"
+    r"|codice\s+a\s+due\s+fattori",
+    r"\d{4,8}|\d{3}[ \-]\d{3}",
 )
 
 _CARTA_KEYWORD_PATTERN = re.compile(
