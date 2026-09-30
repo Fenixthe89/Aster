@@ -1,20 +1,27 @@
 """
-Secret Guard pre-0.7.2d - forme compatte di OTP, PIN e CVV.
+Secret Guard pre-0.7.2d - forme compatte di OTP, PIN, CVV e recovery code.
 
 Il guard analizza il content scritto dal modello, che spesso riscrive la
 richiesta in forma compatta ("Ricordati il codice OTP 582913" diventa
-"OTP 582913"). Per i soli valori numerici (OTP, PIN, CVV) una
-parola-chiave seguita direttamente dal valore deve bastare; un numero
-senza parola-chiave non deve mai essere bloccato.
+"OTP 582913", "Ricordati il recovery code 1234-5678" diventa
+"recovery code 1234-5678"). Per i soli valori strutturati (OTP, PIN, CVV,
+recovery/backup code e recovery key) una parola-chiave seguita
+direttamente dal valore deve bastare; un valore senza parola-chiave non
+deve mai essere bloccato.
 
 Limiti noti, volutamente NON asseriti come ALLOW perché non sono un
 comportamento desiderato:
-- recovery code senza copula o al plurale ("recovery code 1234-5678"),
-  rimandato a un micro-step dedicato;
 - copula inglese "is" ("My OTP is 582913");
 - parole tra parola-chiave e valore senza copula ("OTP della banca 582913");
-- falsi positivi preesistenti della finestra con copula e della password
-  ("La password è scaduta").
+- recovery code di sole lettere ("ABCD-EFGH"), alfanumerici contigui
+  ("AB12CD34"), gruppi con " - " o con en dash, liste markdown
+  ("- 1234-5678"), copula plurale "sono";
+- "backup key" non è una parola-chiave recovery;
+- falsi positivi preesistenti della finestra con copula, della password e
+  del controllo recovery storico ("La password è scaduta",
+  "Il recovery code è lungo 8 caratteri");
+- falsi positivi residui accettati del ramo recovery adiacente
+  ("backup codes 2024-2025", "codice backup 20240315").
 
 Nessun segreto reale: token e intestazioni PEM sono costruiti a runtime
 con placeholder, le carte sono numeri di test pubblici. I test di
@@ -26,6 +33,7 @@ Esecuzione:
 
 import hashlib
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -38,7 +46,11 @@ if str(BASE_DIR) not in sys.path:
 
 from modules.memory import StatoMemoria, MODALITA_NORMALE, carica_archivio
 from modules.memory_session import MemorySessionState
-from modules.memory_tools import esegui_tool_memoria, rileva_contenuto_sensibile
+from modules.memory_tools import (
+    _RECOVERY_CODE_PATTERN,
+    esegui_tool_memoria,
+    rileva_contenuto_sensibile,
+)
 
 LIMITE_RICERCA = 5
 
@@ -399,6 +411,353 @@ class TestRegressioneAltreCategorie(GuardTestCase):
 
 
 # =====================================================================
+# RECOVERY / BACKUP CODE E RECOVERY KEY
+# =====================================================================
+
+# Chiavi sintetiche nei formati BitLocker (8 gruppi da 6 cifre) e Apple
+# (7 gruppi da 4 caratteri): nessuna chiave reale.
+BITLOCKER_FINTA = "-".join(
+    ["123456", "234567", "345678", "456789", "567890", "678901", "789012", "890123"]
+)
+APPLE_FINTA = "-".join(["XK4P", "9Q2M", "7R3T", "W8Y1", "5N6B", "2C4D", "8F9G"])
+
+
+class TestRecoveryCode(GuardTestCase):
+
+    def test_recovery_code(self):
+        self.assertCategoria(
+            [
+                "recovery code 1234-5678",
+                "recovery codes 1234-5678",
+                "recovery code: AB12-CD34",
+                "recovery code 12345678",
+                "recovery code = 12345678",
+                "recovery code a1b2c-3d4e5",
+                "recovery code #AB12-CD34-EF56",
+                "2FA recovery code 1234-5678",
+                "RECOVERY CODE 1234-5678",
+                "Recovery Codes: 1234-5678",
+            ],
+            "recovery_secret",
+        )
+
+    def test_backup_code(self):
+        self.assertCategoria(
+            [
+                "backup code 1234-5678",
+                "backup codes 1234-5678",
+                "backup codes: 1234-5678",
+                "backup codes - 12345678",
+                "backup code — 9876-5432",
+                'backup codes "1234-5678"',
+                "2FA backup code 1234-5678",
+                "BACKUP CODE AB12CD34-EF56",
+                "Backup codes di GitHub: a1b2c-3d4e5 f6g7h-8i9j0",
+                "i miei backup codes Google sono: 1234 5678",
+            ],
+            "recovery_secret",
+        )
+
+    def test_italiano(self):
+        self.assertCategoria(
+            [
+                "codice di recupero 1234-5678",
+                "codici di recupero 1234 5678",
+                "codici di recupero: 1234 5678, 8765 4321",
+                "codice backup AB12-CD34",
+                "codici backup 1234-5678",
+                "codice di backup 12345678",
+                "codici di backup 1234-5678 8765-4321",
+                "codice backup 2FA AB12-CD34",
+                "CODICE DI RECUPERO 1234-5678",
+                "Codice Di Recupero 1234-5678",
+            ],
+            "recovery_secret",
+        )
+
+    def test_recovery_key(self):
+        self.assertCategoria(
+            [
+                "recovery key " + BITLOCKER_FINTA,
+                "La recovery key di BitLocker è " + BITLOCKER_FINTA,
+                "recovery key " + APPLE_FINTA,
+                "recovery keys: " + APPLE_FINTA,
+                "chiave di recupero " + APPLE_FINTA,
+                "chiavi di recupero: " + APPLE_FINTA,
+                "chiave di ripristino " + BITLOCKER_FINTA,
+                "chiave di ripristino BitLocker: " + BITLOCKER_FINTA,
+                "chiavi di ripristino " + BITLOCKER_FINTA,
+            ],
+            "recovery_secret",
+        )
+
+    def test_formati_valore(self):
+        self.assertCategoria(
+            [
+                # gruppi uniti da trattino, almeno una cifra nel token
+                "recovery code 1234-5678",
+                "recovery code AB12-CD34",
+                "recovery code ABCD-1234",
+                "recovery code ABCD1-EFGH2-IJKL3-MNOP4-QRST5",
+                "recovery code 1234abcd-EFGH",
+                "recovery code 1234-5678-9012-3456-7890-1234-5678-9012",
+                # gruppi separati da uno spazio, una cifra in ogni gruppo
+                "recovery code 1234 5678",
+                "recovery code A1B2 C3D4",
+                # cifre contigue
+                "recovery code 12345678",
+                "recovery code 123456789012",
+            ],
+            "recovery_secret",
+        )
+
+    def test_multiline_e_whitespace(self):
+        self.assertCategoria(
+            [
+                "backup codes:\n1234-5678\n8765-4321",
+                "recovery code\n1234-5678",
+                "codici di recupero:\n\n1234 5678\n8765 4321",
+                "Codice di backup GitHub:\r\na1b2c-3d4e5",
+                "recovery codes =\nAB12-CD34\nEF56-GH78",
+                "recovery code    1234-5678",
+                "recovery code\t1234 5678",
+                "recovery code 1234-5678",
+            ],
+            "recovery_secret",
+        )
+
+    def test_codici_multipli(self):
+        # Basta un codice riconosciuto per bloccare l'intero contenuto.
+        self.assertCategoria(
+            [
+                "backup codes: 1234-5678 8765-4321 1111-2222",
+                "recovery codes 1234 5678 8765 4321",
+                "codici di recupero: 1234-5678, 8765-4321, 1111-2222",
+                "backup codes: a1b2c-3d4e5; f6g7h-8i9j0",
+                "codici backup\n1234-5678\n8765-4321\n1111-2222",
+            ],
+            "recovery_secret",
+        )
+
+    def test_valori_senza_parola_chiave(self):
+        self.assertConsentiti(
+            [
+                "Il ticket è 1234-5678",
+                "Ordine 1234-5678",
+                "Codice prodotto AB12-CD34",
+                "codice prodotto AB12-CD34",
+                "Versione ABCD-EFGH",
+                "Build 1234-5678",
+                "ID pratica 1234-5678",
+                "Il codice sconto è AB12-CD34",
+                "Il numero di serie è 1234-5678-9012",
+                "Telefono 1234 5678",
+                "backup giornaliero 1234-5678",
+                "Il backup del NAS gira alle 0300",
+                "Il recovery mode del BIOS usa il tasto F12",
+            ]
+        )
+
+    def test_parola_chiave_senza_valore(self):
+        self.assertConsentiti(
+            [
+                "Cos'è un recovery code?",
+                "Come funzionano i backup codes?",
+                "I recovery code sono importanti",
+                "Ho 8 recovery code",
+                "Ho 8 recovery code su GitHub",
+                "recovery code example",
+                "backup code generation",
+                "recovery code format",
+                "recovery code format guide",
+                "password manager backup",
+                "backup key rotation",
+                "database recovery key",
+                "La chiave di backup del database è un concetto importante",
+                "codice fiscale e codice di recupero sono cose diverse",
+                "codice di backup: in cassaforte",
+                "I codici di backup vanno stampati e tenuti al sicuro dal 2024",
+                "I backup codes sono 10",
+                "recovery codes 10",
+                "codici di recupero: 8 da 4 cifre",
+            ]
+        )
+
+    def test_gap_con_parole(self):
+        self.assertConsentiti(
+            [
+                "recovery code valido per 1234-5678 utenti",
+                "backup codes 2024 rigenerati",
+                "backup codes edizione 2024-2025",
+                "Il codice di recupero arriva via SMS al 3331234567",
+            ]
+        )
+
+    def test_valori_troppo_corti(self):
+        self.assertConsentiti(
+            [
+                "backup code 1234",
+                "recovery code 1234567",
+                "recovery code AB1",
+                "recovery code ABCD",
+                "recovery code 123-456",
+            ]
+        )
+
+    def test_valori_troppo_lunghi(self):
+        self.assertConsentiti(
+            [
+                "recovery code 1234567890123",
+                "recovery code 123456789-1234",
+                "recovery code 1234-123456789",
+                "recovery code 1234-5678-9012-3456-7890-1234-5678-9012-3456",
+            ]
+        )
+
+    def test_separatori_non_supportati(self):
+        self.assertConsentiti(
+            [
+                "recovery code 1234/5678",
+                "recovery code 1234.5678",
+                "recovery code 1234_5678",
+            ]
+        )
+
+    def test_token_tecnici(self):
+        self.assertConsentiti(
+            [
+                "backup code RFC-6238",
+                "backup code ISO-8601",
+                "backup code UTF-8",
+                "recovery codes x86-64",
+                "recovery code v2-2024",
+                "backup code open-source",
+                "backup code self-hosted",
+                "recovery code Windows 11",
+                "recovery code Windows11",
+                "backup code Office365",
+                "recovery code format 2024",
+            ]
+        )
+
+    def test_seed_phrase_invariata(self):
+        self.assertCategoria(
+            [
+                "recovery phrase: abandon ability able about above absent absorb abstract",
+                "mnemonic abandon ability able about above absent absorb abstract",
+            ],
+            "recovery_secret",
+        )
+
+    def test_ordine_dei_controlli_invariato(self):
+        # Il check recovery è l'ultimo: le categorie precedenti prevalgono.
+        self.assertEqual(
+            rileva_contenuto_sensibile("codice di recupero 2FA 1234-5678"),
+            "otp",
+        )
+        self.assertEqual(
+            rileva_contenuto_sensibile(
+                "carta 4111 1111 1111 1111 e recovery code 1234-5678"
+            ),
+            "payment_card",
+        )
+        self.assertEqual(
+            rileva_contenuto_sensibile("PIN 1234 e recovery code 1234-5678"),
+            "pin",
+        )
+
+
+class TestRecoveryCodeConfineValore(GuardTestCase):
+    """
+    Il valore recovery va consumato per intero: il nuovo check non deve
+    bloccare un prefisso valido di un token più lungo non supportato. Il
+    pattern viene verificato anche direttamente, per distinguerlo dal
+    controllo storico con copula.
+    """
+
+    def assertNuovoCheck(self, testi, corrisponde):
+        for testo in testi:
+            with self.subTest(testo=testo):
+                trovato = _RECOVERY_CODE_PATTERN.search(testo) is not None
+                self.assertEqual(trovato, corrisponde)
+
+    def test_prefissi_di_token_piu_lunghi(self):
+        testi = [
+            # nono e decimo gruppo nella forma con spazio
+            "recovery code 1234 5678 9012 3456 7890 1234 5678 9012 3456",
+            "recovery code\n1234 5678 9012 3456 7890 1234 5678 9012 3456",
+            "recovery code 1234 5678 9012 3456 7890 1234 5678 9012 3456 7890",
+            # ultimo gruppo sovralungo nella forma con spazio
+            "recovery code 1234 5678 123456789",
+            "recovery code 1234 5678 9012abcdefgh",
+            "recovery code 12345678 123456789",
+            # continuazioni da token attaccate al valore
+            "recovery code 1234-5678/9012",
+            "recovery code 1234-5678.9012",
+            "recovery code 1234-5678_9012",
+            "recovery code 1234-5678@example",
+            "recovery code 1234-5678\\9012",
+            "recovery code 1234-5678+9012",
+            "recovery code 1234-5678–9012",
+            "recovery code 1234-5678.pdf",
+            "recovery code 12345678/9012",
+            "recovery code 12345678.9012",
+            # token alfanumerico immediatamente più lungo
+            "recovery code 1234-5678-ABCDEFGHIJ",
+            "recovery code 1234-56789abcd",
+            "recovery code 1234-5678é",
+        ]
+        self.assertNuovoCheck(testi, False)
+        # Senza copula (è, e', :, =) il controllo storico non interviene.
+        self.assertConsentiti(testi)
+
+    def test_prefisso_con_copula_escluso_dal_nuovo_check(self):
+        # Con una copula il controllo storico, invariato, può bloccare
+        # questi casi per conto proprio: qui si verifica solo il nuovo
+        # pattern.
+        self.assertNuovoCheck(
+            [
+                "recovery code 1234-5678:9012",
+                "recovery code: 1234-5678/9012",
+                "recovery code: 1234 5678 9012 3456 7890 1234 5678 9012 3456",
+            ],
+            False,
+        )
+
+    def test_forma_con_spazio_da_due_a_otto_gruppi(self):
+        testi = [
+            "recovery code 1234 5678",
+            "recovery code 1234 5678 9012 3456 7890 1234 5678 9012",
+        ]
+        self.assertNuovoCheck(testi, True)
+        self.assertCategoria(testi, "recovery_secret")
+
+    def test_valore_seguito_da_punteggiatura_o_testo(self):
+        testi = [
+            "recovery code 1234-5678, salvato ieri",
+            "recovery code 1234-5678.",
+            "recovery code 1234-5678. Salvato ieri",
+            "(recovery code 1234-5678)",
+            "recovery code 1234-5678;",
+            "recovery code 1234-5678\nL'ho salvato ieri",
+            "recovery code 1234 5678.",
+            "recovery code 1234 5678\nL'ho salvato ieri",
+            "recovery code 1234 5678 salvato nel cassetto",
+            "recovery code 12345678, poi basta",
+        ]
+        self.assertNuovoCheck(testi, True)
+        self.assertCategoria(testi, "recovery_secret")
+
+    def test_lista_con_trattino_resta_bloccata(self):
+        testi = [
+            "recovery code 1234-5678 8765-4321",
+            "backup codes: a1b2c-3d4e5 f6g7h-8i9j0",
+        ]
+        self.assertNuovoCheck(testi, True)
+        self.assertCategoria(testi, "recovery_secret")
+
+
+# =====================================================================
 # PIPELINE MEMORIA SU DIRECTORY TEMPORANEA
 # =====================================================================
 
@@ -453,7 +812,14 @@ class TestPipelineMemoria(unittest.TestCase):
         self.assertEqual(risultato["sensitive_category"], categoria)
         self.assertIsNone(stato_sessione.pending_action)
         self.assertEqual(self._hash(), hash_prima)
-        self.assertNotIn(valore, json.dumps(risultato, ensure_ascii=False))
+
+        # Né il segreto completo né alcuno dei suoi gruppi compaiono nel
+        # risultato, che contiene solo testi fissi privi di cifre.
+        testo = json.dumps(risultato, ensure_ascii=False)
+        frammenti = [valore] + [g for g in re.split(r"[\s\-]+", valore) if g]
+        for frammento in frammenti:
+            with self.subTest(frammento=frammento):
+                self.assertNotIn(frammento, testo)
 
     def test_crea_explicit_otp(self):
         self._seed([], next_id=1)
@@ -534,6 +900,78 @@ class TestPipelineMemoria(unittest.TestCase):
         self.assertEqual(r["status"], "created")
         archivio = carica_archivio(self.percorso_memoria)
         self.assertEqual(archivio["memories"][0]["content"], "Il ticket è 582913")
+
+    def test_crea_explicit_recovery_code(self):
+        self._seed([], next_id=1)
+        hash_prima = self._hash()
+        ss = MemorySessionState()
+
+        r = self._tool(
+            "crea_memoria",
+            {"content": "recovery code 1234-5678", "mode": "explicit"},
+            ss,
+        )
+
+        self._assert_bloccato(r, "recovery_secret", "1234-5678", ss, hash_prima)
+        self.assertEqual(carica_archivio(self.percorso_memoria)["memories"], [])
+
+    def test_crea_proposal_backup_codes(self):
+        self._seed([], next_id=1)
+        hash_prima = self._hash()
+        ss = MemorySessionState()
+
+        r = self._tool(
+            "crea_memoria",
+            {"content": "backup codes: 1234-5678 8765-4321", "mode": "proposal"},
+            ss,
+        )
+
+        self._assert_bloccato(
+            r, "recovery_secret", "1234-5678 8765-4321", ss, hash_prima
+        )
+        self.assertEqual(carica_archivio(self.percorso_memoria)["memories"], [])
+
+    def test_modifica_codice_di_recupero(self):
+        self._seed(
+            [
+                {
+                    "id": 1,
+                    "content": "Contenuto originale",
+                    "created_at": "2026-01-01T10:00:00+01:00",
+                    "updated_at": "2026-01-01T10:00:00+01:00",
+                }
+            ],
+            next_id=2,
+        )
+        hash_prima = self._hash()
+        ss = MemorySessionState()
+
+        r = self._tool(
+            "modifica_memoria",
+            {"memory_id": 1, "new_content": "codice di recupero 1234 5678"},
+            ss,
+        )
+
+        self._assert_bloccato(r, "recovery_secret", "1234 5678", ss, hash_prima)
+        archivio = carica_archivio(self.percorso_memoria)
+        self.assertEqual(archivio["memories"][0]["content"], "Contenuto originale")
+
+    def test_crea_explicit_recovery_key_bitlocker(self):
+        self._seed([], next_id=1)
+        hash_prima = self._hash()
+        ss = MemorySessionState()
+
+        r = self._tool(
+            "crea_memoria",
+            {
+                "content": "La recovery key di BitLocker è " + BITLOCKER_FINTA,
+                "mode": "explicit",
+            },
+            ss,
+        )
+
+        self._assert_bloccato(r, "recovery_secret", BITLOCKER_FINTA, ss, hash_prima)
+        self.assertEqual(carica_archivio(self.percorso_memoria)["memories"], [])
 
 
 if __name__ == "__main__":

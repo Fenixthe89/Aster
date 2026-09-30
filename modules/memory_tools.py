@@ -575,19 +575,19 @@ _TOKEN_KEYWORD_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Ramo "adiacente" per i soli valori numerici (PIN, CVV, OTP): tra
-# parola-chiave e valore solo spazi (newline compreso) e al più un
-# separatore semplice (: = # - – —), mai parole. Copre la forma compatta
+# Ramo "adiacente" per i soli valori strutturati (PIN, CVV, OTP, recovery
+# code): tra parola-chiave e valore solo spazi (newline compreso) e al più
+# un separatore semplice (: = # - – —), mai parole. Copre la forma compatta
 # "OTP 582913" che il modello produce riscrivendo la richiesta
-# dell'utente. Un numero senza parola-chiave non viene mai bloccato.
+# dell'utente. Un valore senza parola-chiave non viene mai bloccato.
 _ADIACENTE = r"\s*(?:[:=#\-–—]\s*)?"
 
 
-def _pattern_keyword_numero(keyword: str, valore: str) -> re.Pattern:
+def _pattern_keyword_valore(keyword: str, valore: str) -> re.Pattern:
     """
-    Parola-chiave seguita da un valore numerico, tramite il ramo storico
-    con copula (finestra di 40 caratteri, invariato) oppure tramite il
-    ramo adiacente.
+    Parola-chiave seguita da un valore strutturato, tramite il ramo
+    storico con copula (finestra di 40 caratteri, invariato) oppure
+    tramite il ramo adiacente.
     """
 
     return re.compile(
@@ -598,11 +598,11 @@ def _pattern_keyword_numero(keyword: str, valore: str) -> re.Pattern:
     )
 
 
-_PIN_PATTERN = _pattern_keyword_numero(r"PIN", r"\d{4,6}")
+_PIN_PATTERN = _pattern_keyword_valore(r"PIN", r"\d{4,6}")
 
-_CVV_PATTERN = _pattern_keyword_numero(r"CVV", r"\d{3,4}")
+_CVV_PATTERN = _pattern_keyword_valore(r"CVV", r"\d{3,4}")
 
-_OTP_PATTERN = _pattern_keyword_numero(
+_OTP_PATTERN = _pattern_keyword_valore(
     r"2FA|OTP"
     r"|one[\s-]*time[\s-]*password"
     r"|(?:codice|password)\s+monouso"
@@ -640,6 +640,44 @@ _RECOVERY_CODE_KEYWORD_PATTERN = re.compile(
 
 _RECOVERY_CODE_VALUE_PATTERN = re.compile(
     rf"[^.\n]{{0,40}}?{_COPULA}\s*['\"]?([A-Za-z0-9]{{4,6}}(?:-[A-Za-z0-9]{{4,6}})?)\b"
+)
+
+# Recovery/backup code e recovery key ancorati alla parola-chiave (stessi
+# due rami di PIN/CVV/OTP). Il valore è un codice, mai testo libero:
+# gruppi da 4-8 uniti da trattino con almeno una cifra nel token, gruppi
+# separati da un solo spazio con una cifra in ogni gruppo, oppure 8-12
+# cifre contigue. Si aggiunge al controllo storico, che resta invariato.
+#
+# Il valore va consumato per intero: mai un prefisso valido di un token
+# più lungo. Dopo il valore non possono seguire un carattere di parola o
+# un trattino, né un separatore da token (/ \ . : @ + – —) attaccato ad
+# altro testo; punteggiatura finale, virgola, parentesi e newline restano
+# ammessi.
+_RECOVERY_FINE_TOKEN = r"(?![\w\-])(?![/\\.:@+–—]\w)"
+
+# Nelle forme con spazio (e nelle cifre contigue, che ne sarebbero il
+# primo gruppo) un altro gruppo con cifre dopo un singolo spazio fa parte
+# dello stesso valore: con un nono gruppo o con un gruppo sovralungo il
+# valore intero non corrisponde. La forma con trattino resta una lista:
+# "1234-5678 8765-4321" sono due codici.
+_RECOVERY_FINE_GRUPPI = r"(?! [^\W_]*\d)"
+
+_RECOVERY_CODE_VALORE = (
+    r"(?:(?=[A-Za-z0-9\-]*[0-9])[A-Za-z0-9]{4,8}(?:-[A-Za-z0-9]{4,8}){1,7}"
+    rf"{_RECOVERY_FINE_TOKEN}"
+    r"|(?=[A-Za-z]*[0-9])[A-Za-z0-9]{4,8}"
+    r"(?: (?=[A-Za-z]*[0-9])[A-Za-z0-9]{4,8}){1,7}"
+    rf"{_RECOVERY_FINE_TOKEN}{_RECOVERY_FINE_GRUPPI}"
+    rf"|[0-9]{{8,12}}{_RECOVERY_FINE_TOKEN}{_RECOVERY_FINE_GRUPPI})"
+)
+
+_RECOVERY_CODE_PATTERN = _pattern_keyword_valore(
+    r"(?:(?:recovery|backup)\s+codes?"
+    r"|recovery\s+keys?"
+    r"|codic[ei]\s+(?:di\s+)?(?:recupero|backup)"
+    r"|chiav[ei]\s+di\s+(?:recupero|ripristino))"
+    r"(?:\s+2FA)?",
+    _RECOVERY_CODE_VALORE,
 )
 
 
@@ -726,6 +764,9 @@ def rileva_contenuto_sensibile(content: str) -> str | None:
         _RECOVERY_CODE_KEYWORD_PATTERN.search(content)
         and _RECOVERY_CODE_VALUE_PATTERN.search(content)
     ):
+        return "recovery_secret"
+
+    if _RECOVERY_CODE_PATTERN.search(content):
         return "recovery_secret"
 
     return None
