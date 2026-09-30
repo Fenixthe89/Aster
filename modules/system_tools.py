@@ -52,8 +52,8 @@ TOOLS_SISTEMA = [
             "name": "get_system_info",
             "description": (
                 "Dati reali del computer locale: sistema operativo, CPU "
-                "(modello, core, thread, uso), RAM, uptime, schede video "
-                "(GPU) e loro VRAM dedicata totale. Nessun parametro."
+                "(modello, core, thread, uso), RAM, uptime, GPU e VRAM "
+                "dedicata totale."
             ),
             "parameters": {
                 "type": "object",
@@ -67,11 +67,9 @@ TOOLS_SISTEMA = [
         "function": {
             "name": "get_disk_usage",
             "description": (
-                "Restituisce lo spazio totale, usato e libero (in byte) del "
-                "filesystem che contiene realmente l'installazione di Aster. "
-                "Non riguarda tutti i dischi del sistema, né una cartella "
-                "specifica, né un drive scelto dall'utente. Non richiede "
-                "parametri."
+                "Spazio totale, usato e libero (byte) del solo filesystem "
+                "che contiene realmente Aster: non di tutte le unità né di "
+                "una cartella."
             ),
             "parameters": {
                 "type": "object",
@@ -115,7 +113,7 @@ TOOLS_SISTEMA = [
             "description": (
                 "Spazio (byte e % usata) delle unità locali fisse con lettera "
                 "(C:, D:, ...). Esclude le unità che Windows classifica come "
-                "rete, rimovibili, ottiche o RAM disk. Nessun parametro."
+                "rete, rimovibili, ottiche o RAM disk."
             ),
             "parameters": {
                 "type": "object",

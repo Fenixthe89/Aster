@@ -180,10 +180,7 @@ TOOLS_MEMORIA = [
         "type": "function",
         "function": {
             "name": "cerca_memoria",
-            "description": (
-                "Cerca informazioni nella memoria persistente di Aster "
-                "quando servono ricordi precedenti dell'utente."
-            ),
+            "description": "Cerca nei ricordi persistenti dell'utente.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -200,27 +197,20 @@ TOOLS_MEMORIA = [
         "type": "function",
         "function": {
             "name": "crea_memoria",
-            "description": (
-                "Richiede la creazione di un nuovo ricordo permanente. "
-                "Usare mode='explicit' quando l'utente ha chiesto "
-                "direttamente di memorizzare il fatto. "
-                "Usare mode='proposal' quando Aster vuole soltanto "
-                "proporre il ricordo e attendere conferma."
-            ),
+            "description": "Salva un nuovo ricordo permanente.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "Contenuto preciso del ricordo da salvare.",
+                        "description": "Contenuto preciso del ricordo.",
                     },
                     "mode": {
                         "type": "string",
                         "enum": ["explicit", "proposal"],
                         "description": (
-                            "Usa 'explicit' quando l'utente ha autorizzato "
-                            "direttamente il salvataggio. Usa 'proposal' "
-                            "quando Aster sta proponendo spontaneamente il ricordo."
+                            "'explicit' se l'utente ha chiesto di memorizzarlo; "
+                            "'proposal' se lo proponi tu (salvato solo dopo conferma)."
                         ),
                     },
                 },
@@ -270,20 +260,16 @@ TOOLS_MEMORIA = [
         "function": {
             "name": "elimina_memoria_per_query",
             "description": (
-                "Cerca il ricordo da eliminare quando l'utente "
-                "non ha fornito un ID esplicito. "
-                "Se esiste un solo candidato prepara la conferma; "
-                "se ne esistono più di uno richiede la selezione."
+                "Trova il ricordo da eliminare quando l'utente "
+                "non indica un ID esplicito; "
+                "prepara la conferma o la selezione."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": (
-                            "Testo da cercare nei ricordi per identificare "
-                            "il ricordo che l'utente vuole eliminare."
-                        ),
+                        "description": "Testo per identificare il ricordo da eliminare.",
                     },
                 },
                 "required": ["query"],
@@ -313,8 +299,8 @@ TOOLS_MEMORIA = [
         "function": {
             "name": "gestisci_pending_memoria",
             "description": (
-                "Gestisce la risposta dell'utente a un'operazione "
-                "di memoria già in attesa. Usare solo quando esiste un pending."
+                "Risposta dell'utente a un'operazione "
+                "di memoria in attesa. Solo se esiste un pending."
             ),
             "parameters": {
                 "type": "object",
@@ -322,10 +308,7 @@ TOOLS_MEMORIA = [
                     "decision": {
                         "type": "string",
                         "enum": ["confirm", "cancel", "select"],
-                        "description": (
-                            "Conferma, annulla oppure seleziona "
-                            "un candidato dell'operazione pending."
-                        ),
+                        "description": "Conferma, annulla o seleziona un candidato.",
                     },
                     "memory_id": {
                         "type": "integer",

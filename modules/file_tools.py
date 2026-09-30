@@ -18,10 +18,9 @@ TOOLS_FILE = [
         "function": {
             "name": "list_directory",
             "description": (
-                "Elenca nomi e tipo (file, directory o other) di un solo "
-                "livello di una directory dentro una posizione autorizzata. "
-                "Nessuna ricorsione, nessuna ricerca, nessun contenuto di "
-                "file."
+                "Nomi e tipo (file, directory, other) del contenuto di una "
+                "directory autorizzata: un solo livello, senza ricorsione né "
+                "contenuto dei file."
             ),
             "parameters": {
                 "type": "object",
@@ -29,8 +28,8 @@ TOOLS_FILE = [
                     "path": {
                         "type": "string",
                         "description": (
-                            "Percorso della directory da elencare, cosi' "
-                            "come espresso dall'utente."
+                            "Percorso della directory, come indicato "
+                            "dall'utente."
                         ),
                     }
                 },
@@ -43,10 +42,9 @@ TOOLS_FILE = [
         "function": {
             "name": "read_file",
             "description": (
-                "Legge il contenuto testuale di un singolo file dentro una "
-                "posizione autorizzata, fino a 2 KiB. Rifiuta file binari, "
-                "troppo grandi o riconosciuti come potenzialmente sensibili "
-                "(per nome o per contenuto)."
+                "Testo di un singolo file autorizzato, fino a 2 KiB. "
+                "Rifiuta file binari, troppo grandi o potenzialmente "
+                "sensibili."
             ),
             "parameters": {
                 "type": "object",
@@ -54,8 +52,7 @@ TOOLS_FILE = [
                     "path": {
                         "type": "string",
                         "description": (
-                            "Percorso del file da leggere, cosi' come "
-                            "espresso dall'utente."
+                            "Percorso del file, come indicato dall'utente."
                         ),
                     }
                 },
