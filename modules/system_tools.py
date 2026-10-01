@@ -3,11 +3,12 @@
 import math
 import platform
 import shutil
+import string
 import time
 import unicodedata
 from pathlib import Path
 
-from modules import gpu_info, volume_info
+from modules import gpu_info, process_info, volume_info
 from modules.tool_registry import RegistroStrumenti, ToolSpec
 
 # Import protetto: se psutil manca, Aster parte comunque; list_processes
@@ -23,9 +24,10 @@ try:
 except ImportError:
     winreg = None
 
-# Limite di processi restituiti da list_processes: il risultato entra
-# in role="tool" e resta in cronologia, quindi va tenuto contenuto.
-MAX_PROCESS_ENTRIES = 50
+# Limite di GRUPPI (processi aggregati per nome) restituiti da
+# list_processes: il risultato entra in role="tool" e resta in
+# cronologia, quindi va tenuto contenuto.
+MAX_PROCESS_ENTRIES = 20
 
 # Finestra di campionamento di cpu_percent: con interval=None le
 # chiamate di un processo appena avviato o ravvicinate restituiscono
@@ -38,9 +40,37 @@ _VALORE_REGISTRO_CPU = "ProcessorNameString"
 _MAX_LUNGHEZZA_FILTRO = 64
 _MAX_LUNGHEZZA_NOME_PROCESSO = 255
 
+# Valori esatti (dopo strip + casefold) che il modello usa a volte per
+# dire "nessun filtro": mai un confronto per sottostringa.
+_SENTINELLE_NESSUN_FILTRO = frozenset({"nil", "none", "null", "<nil>"})
+
+_ORDINAMENTI = ("cpu", "memory")
+_ORDINAMENTO_PREDEFINITO = "memory"
+
+# Nome mostrato al modello: al massimo MAX_PROCESS_NAME_UNITS unità
+# pesate per avvicinare il costo reale in token (una cifra ASCII o un
+# segno di punteggiatura valgono circa un token, un carattere non ASCII
+# anche più di uno, un carattere astrale fino a quattro). Filtro,
+# aggregazione, ordinamento e scelta dei top usano sempre il nome completo.
+MAX_PROCESS_NAME_UNITS = 40
+_CIFRE_ASCII = frozenset("0123456789")
+# Esattamente gli ASCII stampabili non alfanumerici e non spazio
+# (string.punctuation è una costante, indipendente da locale e Unicode).
+_PUNTEGGIATURA_ASCII = frozenset(string.punctuation)
+_PESO_CIFRA_NOME = 3
+_PESO_PUNTEGGIATURA_NOME = 2
+_PESO_ASCII_NOME = 1
+_PESO_BMP_NOME = 4
+_PESO_ASTRALE_NOME = 8
+_MAX_CODICE_BMP = 0xFFFF
+# Il suffisso pesa come qualunque altro testo mostrato ("." è
+# punteggiatura: 6 unità): il nome troncato resta sempre nel limite.
+_SUFFISSO_NOME_TRONCATO = "..."
+
 _ERRORE_PSUTIL_ASSENTE = "Elenco processi non disponibile su questa installazione."
 _ERRORE_ENUMERAZIONE = "Non sono riuscito a leggere l'elenco dei processi."
 _ERRORE_FILTRO_NON_VALIDO = "Filtro nome non valido."
+_ERRORE_ORDINAMENTO_NON_VALIDO = "Ordinamento non valido: usa cpu oppure memory."
 
 _ERRORE_VOLUMI_NON_SUPPORTATI = "L'elenco delle unità locali è disponibile solo su Windows."
 _ERRORE_VOLUMI = "Non sono riuscito a elencare le unità locali."
@@ -83,10 +113,11 @@ TOOLS_SISTEMA = [
         "function": {
             "name": "list_processes",
             "description": (
-                "Elenca i processi attualmente in esecuzione sul computer "
-                "locale (solo nome e PID). Sola osservazione: non avvia, "
-                "chiude né modifica processi. Un processo non corrisponde "
-                "necessariamente a una finestra visibile."
+                "Elenca i processi in esecuzione sul computer locale, "
+                "raggruppati per nome programma, con uso attuale di CPU e "
+                "RAM. Sola osservazione: non avvia, chiude né modifica "
+                "processi. Un processo non corrisponde necessariamente a "
+                "una finestra visibile."
             ),
             "parameters": {
                 "type": "object",
@@ -99,6 +130,14 @@ TOOLS_SISTEMA = [
                             "ollama). Confronto senza distinzione "
                             "maiuscole/minuscole. Ometti per l'elenco "
                             "generale."
+                        ),
+                    },
+                    "sort": {
+                        "type": "string",
+                        "enum": ["cpu", "memory"],
+                        "description": (
+                            "Opzionale: ordina per uso di CPU o di RAM "
+                            "(memory), per trovare chi consuma di più."
                         ),
                     },
                 },
@@ -448,9 +487,10 @@ def _normalizza_filtro_nome(valore) -> tuple[bool, str | None]:
     Valida il parametro opzionale name di list_processes.
 
     Restituisce (valido, filtro). None, "" o soli spazi significano
-    nessun filtro (filtro=None). Tipo non stringa, caratteri di
-    controllo o lunghezza oltre _MAX_LUNGHEZZA_FILTRO dopo strip()
-    rendono il filtro non valido. Il filtro e' solo testo per un
+    nessun filtro (filtro=None), così come le sole sentinelle esatte
+    nil/none/null/<nil> (dopo strip e casefold). Tipo non stringa,
+    caratteri di controllo o lunghezza oltre _MAX_LUNGHEZZA_FILTRO dopo
+    strip() rendono il filtro non valido. Il filtro e' solo testo per un
     confronto Python per sottostringa: nessuna regex, wildcard o shell.
     """
 
@@ -465,13 +505,118 @@ def _normalizza_filtro_nome(valore) -> tuple[bool, str | None]:
 
     filtro = valore.strip()
 
-    if not filtro:
+    if not filtro or filtro.casefold() in _SENTINELLE_NESSUN_FILTRO:
         return True, None
 
     if len(filtro) > _MAX_LUNGHEZZA_FILTRO:
         return False, None
 
     return True, filtro
+
+
+def _normalizza_ordinamento(valore) -> str | None:
+    """sort di list_processes: assente/null -> memory; solo "cpu" o "memory" esatti, altrimenti None."""
+
+    if valore is None:
+        return _ORDINAMENTO_PREDEFINITO
+    if isinstance(valore, str) and valore in _ORDINAMENTI:
+        return valore
+    return None
+
+
+def _unita_carattere_nome(carattere: str) -> int:
+    """
+    Peso di un carattere del nome: cifra ASCII 3, punteggiatura ASCII 2,
+    altro ASCII (lettere, spazio) 1, non ASCII BMP 4, astrale 8.
+    """
+
+    if carattere in _CIFRE_ASCII:
+        return _PESO_CIFRA_NOME
+    if carattere in _PUNTEGGIATURA_ASCII:
+        return _PESO_PUNTEGGIATURA_NOME
+    if carattere.isascii():
+        return _PESO_ASCII_NOME
+    if ord(carattere) <= _MAX_CODICE_BMP:
+        return _PESO_BMP_NOME
+    return _PESO_ASTRALE_NOME
+
+
+def _unita_nome(testo: str) -> int:
+    return sum(_unita_carattere_nome(carattere) for carattere in testo)
+
+
+def _nome_mostrato(nome: str) -> str:
+    """
+    Nome limitato a MAX_PROCESS_NAME_UNITS unità pesate.
+
+    Si itera per caratteri Python (mai byte): nessun carattere viene
+    spezzato. Se va tagliato, il suffisso "..." sta dentro lo stesso
+    budget, pesato come il resto: il risultato non supera mai il limite.
+    """
+
+    if _unita_nome(nome) <= MAX_PROCESS_NAME_UNITS:
+        return nome
+
+    budget = MAX_PROCESS_NAME_UNITS - _unita_nome(_SUFFISSO_NOME_TRONCATO)
+    tenuti = []
+    for carattere in nome:
+        costo = _unita_carattere_nome(carattere)
+        if costo > budget:
+            break
+        tenuti.append(carattere)
+        budget -= costo
+
+    return "".join(tenuti) + _SUFFISSO_NOME_TRONCATO
+
+
+def _gruppo_misurabile(gruppo) -> bool:
+    return gruppo.metriche == process_info.LEGGIBILE
+
+
+def _chiave_ordinamento(ordinamento: str):
+    """Misurabili per metrica decrescente, poi marcatori; parità per nome casefold e nome."""
+
+    def chiave(gruppo):
+        if not _gruppo_misurabile(gruppo):
+            return (1, 0, gruppo.nome.casefold(), gruppo.nome)
+        valore = gruppo.cpu_percent if ordinamento == "cpu" else gruppo.memory_bytes
+        return (0, -valore, gruppo.nome.casefold(), gruppo.nome)
+
+    return chiave
+
+
+def _nome_massimo(gruppi: list, campo: str, solo_positivi: bool = False) -> str | None:
+    """
+    Nome (limitato) del gruppo misurabile col valore più alto.
+
+    None se nessun gruppo è misurabile oppure, con solo_positivi, se
+    tutti i valori sono 0: nessun vincitore scelto per ordine alfabetico.
+    """
+
+    misurabili = [
+        gruppo for gruppo in gruppi
+        if _gruppo_misurabile(gruppo) and (not solo_positivi or getattr(gruppo, campo) > 0)
+    ]
+    if not misurabili:
+        return None
+
+    vincitore = min(
+        misurabili,
+        key=lambda gruppo: (-getattr(gruppo, campo), gruppo.nome.casefold(), gruppo.nome),
+    )
+    return _nome_mostrato(vincitore.nome)
+
+
+def _entry_gruppo(gruppo) -> dict:
+    """Entry di output: metriche complete oppure marcatore testuale, mai null né PID."""
+
+    entry = {"name": _nome_mostrato(gruppo.nome), "instances": gruppo.istanze}
+    if _gruppo_misurabile(gruppo):
+        entry["cpu_percent"] = gruppo.cpu_percent
+        entry["memory_bytes"] = gruppo.memory_bytes
+    else:
+        entry["metrics"] = gruppo.metriche
+    return entry
 
 
 def _entry_processo_valida(info) -> dict | None:
@@ -498,6 +643,23 @@ def _entry_processo_valida(info) -> dict | None:
     return {"pid": pid, "name": nome}
 
 
+def _identita_attorno_al_nome(prima, dopo) -> tuple[bool, int | None]:
+    """
+    (candidato valido, creation time atteso) dalle due letture attorno al nome.
+
+    Stesso FILETIME prima e dopo -> metriche ammesse con quell'identità.
+    Entrambe illeggibili (processo protetto o non apribile) -> solo
+    marcatore, mai metriche. Identità cambiata, o leggibile una sola
+    volta -> PID ambiguo durante la lettura del nome: processo escluso.
+    """
+
+    if prima is None and dopo is None:
+        return True, None
+    if prima is not None and prima == dopo:
+        return True, prima
+    return False, None
+
+
 def list_processes(argomenti: dict, contesto) -> dict:
     """
     Handler del tool list_processes.
@@ -509,9 +671,21 @@ def list_processes(argomenti: dict, contesto) -> dict:
     fallire il tool; solo un errore dell'enumerazione globale produce
     tool_error, sempre con messaggio fisso (mai il testo
     dell'eccezione, che potrebbe contenere path o dettagli OS).
-    Ordina per (name.casefold(), pid) PRIMA di troncare a
-    MAX_PROCESS_ENTRIES; total conta tutti i processi validi che
-    corrispondono al filtro. Nessuna deduplicazione per nome.
+
+    Identità = creation time FILETIME, letto prima e dopo il nome di
+    ogni processo (il nome non viene mai letto prima): le metriche vanno
+    a quel nome solo se l'identità resta la stessa attorno al nome e
+    poi nelle due passate di process_info. Il creation time non entra
+    mai nel risultato.
+
+    Il filtro si applica al nome completo PRIMA dell'aggregazione;
+    process_info raggruppa per nome completo esatto e misura CPU e RAM
+    (o marca il gruppo protected_process / not_available, mai null né
+    somme parziali). I gruppi si ordinano per sort (default memory),
+    misurabili prima dei marcatori, PRIMA di troncare a
+    MAX_PROCESS_ENTRIES. total, top_cpu, top_memory e
+    metrics_unavailable si calcolano su tutti i gruppi corrispondenti,
+    prima del troncamento. Nessun PID in output.
     """
 
     argomenti = argomenti if isinstance(argomenti, dict) else {}
@@ -520,6 +694,10 @@ def list_processes(argomenti: dict, contesto) -> dict:
     if not valido:
         return _errore_list_processes(_ERRORE_FILTRO_NON_VALIDO)
 
+    ordinamento = _normalizza_ordinamento(argomenti.get("sort"))
+    if ordinamento is None:
+        return _errore_list_processes(_ERRORE_ORDINAMENTO_NON_VALIDO)
+
     if psutil is None:
         return _errore_list_processes(_ERRORE_PSUTIL_ASSENTE)
 
@@ -527,7 +705,14 @@ def list_processes(argomenti: dict, contesto) -> dict:
     processi = []
 
     try:
-        for processo in psutil.process_iter(["pid", "name"]):
+        leggi_creazione = process_info.crea_lettore_creazione()
+        # psutil 7 riusa tra una chiamata e l'altra gli oggetti Process in
+        # cache, nome compreso, senza riverificarne l'identità: un PID
+        # riusato manterrebbe il nome vecchio. Oggetti nuovi a ogni chiamata.
+        psutil.process_iter.cache_clear()
+
+        # Solo il PID: il nome non viene letto prima dell'identità.
+        for processo in psutil.process_iter(["pid"]):
             try:
                 info = processo.info
             except (
@@ -537,7 +722,28 @@ def list_processes(argomenti: dict, contesto) -> dict:
             ):
                 continue
 
-            entry = _entry_processo_valida(info)
+            pid = info.get("pid") if isinstance(info, dict) else None
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                continue
+
+            # Identità prima e dopo la lettura del nome: il nome appartiene
+            # al processo misurato solo se in mezzo l'identità non cambia.
+            prima = leggi_creazione(pid)
+            try:
+                nome = processo.name()
+            except (
+                psutil.NoSuchProcess,
+                psutil.AccessDenied,
+                psutil.ZombieProcess,
+            ):
+                continue
+            dopo = leggi_creazione(pid)
+
+            stabile, creazione = _identita_attorno_al_nome(prima, dopo)
+            if not stabile:
+                continue
+
+            entry = _entry_processo_valida({"pid": pid, "name": nome})
             if entry is None:
                 continue
 
@@ -547,22 +753,31 @@ def list_processes(argomenti: dict, contesto) -> dict:
             ):
                 continue
 
-            processi.append(entry)
+            processi.append((entry["pid"], entry["name"], creazione))
+
+        gruppi = process_info.misura_gruppi(processi, _raccogli(_processori_logici))
     except Exception:
         return _errore_list_processes(_ERRORE_ENUMERAZIONE)
 
-    processi.sort(key=lambda entry: (entry["name"].casefold(), entry["pid"]))
-    totale = len(processi)
+    gruppi.sort(key=_chiave_ordinamento(ordinamento))
+    totale = len(gruppi)
 
     return {
         "ok": True,
         "operation": "list_processes",
         "status": "success",
         "data": {
-            "processes": processi[:MAX_PROCESS_ENTRIES],
+            "processes": [_entry_gruppo(gruppo) for gruppo in gruppi[:MAX_PROCESS_ENTRIES]],
             "name_filter": filtro,
+            "sort": ordinamento,
             "total": totale,
             "truncated": totale > MAX_PROCESS_ENTRIES,
+            # Tutte le CPU visibili a 0%: nessun "processo che usa più CPU".
+            "top_cpu": _nome_massimo(gruppi, "cpu_percent", solo_positivi=True),
+            "top_memory": _nome_massimo(gruppi, "memory_bytes"),
+            "metrics_unavailable": sum(
+                1 for gruppo in gruppi if not _gruppo_misurabile(gruppo)
+            ),
         },
     }
 
@@ -752,10 +967,14 @@ def _fallback_list_processes(risultato_tool: dict) -> str:
             or "Non sono riuscito a leggere l'elenco dei processi."
         )
 
-    data = risultato_tool.get("data", {})
-    processi = data.get("processes") or []
+    data = risultato_tool.get("data")
+    data = data if isinstance(data, dict) else {}
+    processi = data.get("processes")
+    processi = processi if isinstance(processi, list) else []
     filtro = data.get("name_filter")
-    totale = data.get("total", len(processi))
+    totale = _intero_non_negativo(data.get("total"))
+    if totale is None:
+        totale = len(processi)
 
     if not processi:
         if filtro:
@@ -767,26 +986,68 @@ def _fallback_list_processes(risultato_tool: dict) -> str:
 
     if filtro:
         intestazione = (
-            f'Processi attivi corrispondenti al filtro "{filtro}": {totale}'
+            f'Programmi corrispondenti al filtro "{filtro}": {totale}'
         )
     else:
         intestazione = (
-            f"Processi attivi osservabili: {totale} "
+            f"Programmi in esecuzione (processi raggruppati per nome): {totale} "
             "(non tutti corrispondono a finestre o app visibili)"
         )
 
     righe = [intestazione]
-    righe.extend(
-        f"- {processo.get('name')} (PID {processo.get('pid')})"
-        for processo in processi
-    )
+    righe.extend(_riga_gruppo_processi(gruppo) for gruppo in processi)
 
-    if data.get("truncated"):
+    for etichetta, chiave in (("CPU", "top_cpu"), ("RAM", "top_memory")):
+        nome = data.get(chiave)
+        if isinstance(nome, str) and nome:
+            righe.append(f"Uso di {etichetta} più alto: {nome}")
+
+    if data.get("truncated") is True:
         righe.append(
-            f"Elenco parziale: mostrati {len(processi)} processi su {totale}."
+            f"Elenco parziale: mostrati {len(processi)} programmi su {totale}."
         )
 
     return "\n".join(righe)
+
+
+def _formatta_bytes_processo(valore_bytes: int) -> str:
+    """RAM di un processo per il solo testo del fallback: MiB sotto 1 GiB, poi GiB/TiB."""
+
+    if valore_bytes < 1024 ** 3:
+        return f"{valore_bytes / (1024 ** 2):.0f} MiB"
+    return _formatta_bytes(valore_bytes)
+
+
+def _riga_gruppo_processi(gruppo) -> str:
+    """Riga del fallback per un gruppo: metriche solo se valide, mai PID né valori inventati."""
+
+    if not isinstance(gruppo, dict):
+        gruppo = {}
+
+    nome = gruppo.get("name")
+    if not isinstance(nome, str) or not nome:
+        nome = "Processo senza nome"
+
+    istanze = _intero_positivo(gruppo.get("instances"))
+    if istanze is None:
+        testo_istanze = "istanze non note"
+    else:
+        testo_istanze = "1 processo" if istanze == 1 else f"{istanze} processi"
+
+    cpu = gruppo.get("cpu_percent")
+    memoria = gruppo.get("memory_bytes")
+    if (
+        _intero_non_negativo(cpu) is not None
+        and cpu <= 100
+        and _intero_non_negativo(memoria) is not None
+    ):
+        metriche = f"CPU {cpu}%, RAM {_formatta_bytes_processo(memoria)}"
+    elif gruppo.get("metrics") == process_info.PROCESSO_PROTETTO:
+        metriche = "CPU e RAM non leggibili (processo protetto dal sistema)"
+    else:
+        metriche = "CPU e RAM non disponibili"
+
+    return f"- {nome} ({testo_istanze}): {metriche}"
 
 
 def _riga_volume(volume) -> str:
