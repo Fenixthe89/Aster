@@ -1,6 +1,7 @@
 """Ciclo conversazionale e gestione della cronologia."""
 import json
 import re
+import string
 from pathlib import Path
 
 from modules.file_tools import (
@@ -402,18 +403,30 @@ def _fallback_minimo_dominio_sconosciuto(risultato_tool: dict) -> str:
     return "Non riesco a gestire questa richiesta."
 
 # ---------------------------------------------------------------------
-# Budget della cronologia (0.6.8, in unità pesate dal context hardening)
+# Budget della cronologia (History Token Budget v2, policy E16)
 # ---------------------------------------------------------------------
-# Rete di sicurezza pratica, NON una garanzia token-safe. Il budget è in
-# unità pesate: ogni cifra ASCII 0-9 costa 3 unità (per il modello una
-# cifra vale circa un token), ogni altro carattere 1. Le soglie di
-# compattazione restano in caratteri.
+# Il budget è in unità pesate per stare sotto ~0.5 token per unità anche
+# con testo Unicode ad alta densità di token:
+# - ASCII: cifra 0-9 = 3 (circa un token per cifra), punteggiatura
+#   (string.punctuation) = 2, ogni altro carattere ASCII = 1 (lettere,
+#   spazi, a capo, controlli);
+# - non ASCII: 2 unità per ogni byte UTF-8 del carattere (2/3/4 byte ->
+#   4/6/8). Un tokenizer BPE a byte non usa mai più di un token per byte:
+#   il limite non dipende dal modello né dalla lingua;
+# - +1 per ogni lettera ASCII dentro sequenze alfanumeriche ininterrotte
+#   di almeno 16 caratteri (hash, base64, token): stringhe senza parole
+#   costano più token della prosa.
+# Le soglie di compattazione restano in caratteri.
 SOGLIA_COMPATTAZIONE_TOOL = 1000
 SOGLIA_COMPATTAZIONE_RISPOSTA = 2000
 MAX_UNITA_CRONOLOGIA = 4000
 
 _CIFRE_ASCII = "0123456789"
 _PESO_CIFRA = 3
+_PESO_PUNTEGGIATURA = 2
+_UNITA_PER_BYTE_NON_ASCII = 2
+_SENZA_PUNTEGGIATURA = str.maketrans("", "", string.punctuation)
+_SEQUENZA_ALFANUMERICA_LUNGA = re.compile(r"[A-Za-z0-9]{16,}")
 
 # Placeholder fisso per un risultato tool non JSON: nessun dato originale.
 PLACEHOLDER_TOOL_OMESSO = '{"omitted_from_history": true}'
@@ -439,12 +452,37 @@ def _ha_tool_calls(messaggio) -> bool:
     )
 
 
-def _unita_testo(testo: str) -> int:
-    """Unità pesate di un testo: 3 per ogni cifra ASCII 0-9, 1 per ogni altro carattere."""
-
+def _conta_cifre_ascii(testo: str) -> int:
     # Solo ASCII: str.isdigit() includerebbe anche cifre Unicode (es. "²").
-    cifre = sum(testo.count(cifra) for cifra in _CIFRE_ASCII)
-    return len(testo) + (_PESO_CIFRA - 1) * cifre
+    return sum(testo.count(cifra) for cifra in _CIFRE_ASCII)
+
+
+def _unita_testo(testo: str) -> int:
+    """
+    Unità pesate di un testo (policy E16).
+
+    ASCII: cifra 3, punteggiatura 2, altro 1. Non ASCII: 2 unità per
+    byte UTF-8 (surrogati isolati contati come 3 byte, mai un errore).
+    +1 per ogni lettera ASCII in sequenze [A-Za-z0-9] lunghe almeno 16.
+    Solo primitive C della stdlib: nessun ciclo per carattere.
+    """
+
+    solo_ascii = testo.encode("ascii", "ignore").decode("ascii")
+    punteggiatura = len(solo_ascii) - len(solo_ascii.translate(_SENZA_PUNTEGGIATURA))
+    byte_non_ascii = len(testo.encode("utf-8", "surrogatepass")) - len(solo_ascii)
+
+    unita = (
+        len(solo_ascii)
+        + (_PESO_CIFRA - 1) * _conta_cifre_ascii(solo_ascii)
+        + (_PESO_PUNTEGGIATURA - 1) * punteggiatura
+        + _UNITA_PER_BYTE_NON_ASCII * byte_non_ascii
+    )
+
+    for sequenza in _SEQUENZA_ALFANUMERICA_LUNGA.finditer(testo):
+        lettere = len(sequenza.group()) - _conta_cifre_ascii(sequenza.group())
+        unita += lettere
+
+    return unita
 
 
 def _costo_cronologia(messaggio) -> int:

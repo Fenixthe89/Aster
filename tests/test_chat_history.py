@@ -3,9 +3,14 @@
 
 Verifica limita_cronologia: compattazione dei risultati tool
 voluminosi, compattazione della risposta assistant lunga nei soli
-turni tool pesanti, limite per numero di messaggi e per unità pesate
-(cifre ASCII 3, ogni altro carattere 1), tagli sempre per turni interi
-(nessun messaggio orfano).
+turni tool pesanti, limite per numero di messaggi e per unità pesate,
+tagli sempre per turni interi (nessun messaggio orfano).
+
+History Token Budget v2 (policy E16): cifra ASCII 3, punteggiatura
+ASCII 2, altro ASCII 1, ogni carattere non ASCII 2 unità per byte UTF-8,
++1 per lettera in sequenze [A-Za-z0-9] di almeno 16 caratteri. I test
+verificano pesi esatti e proprietà deterministiche, mai conteggi di
+token di un modello.
 
 Verifica il rollback del turno in avvia_chat: su eccezione o
 interruzione la cronologia torna esattamente allo stato pre-turno.
@@ -26,6 +31,7 @@ import contextlib
 import io
 import json
 import shutil
+import string
 import sys
 import tempfile
 import unittest
@@ -275,7 +281,9 @@ class TestCompattazione(unittest.TestCase):
         self.assertEqual(messaggi[4]["content"], "Il file parla di Aster.")
 
     def test_07c_assistant_lungo_dopo_tool_piccolo_non_compattato(self):
-        risposta = "r" * (SOGLIA_COMPATTAZIONE_RISPOSTA + 500)
+        # Prosa con spazi: una sola sequenza di 2500 lettere ora pesa il
+        # doppio (regola delle sequenze lunghe) e supererebbe il budget.
+        risposta = ("risposta " * 300)[:SOGLIA_COMPATTAZIONE_RISPOSTA + 500]
         turno = _turno_tool({"ok": True, "operation": "get_system_info", "status": "success"},
                             risposta=risposta)
         messaggi = _limita([*turno, _user("altro")])
@@ -418,24 +426,35 @@ class TestCostoCronologia(unittest.TestCase):
     def test_vuoto(self):
         self.assertEqual(chat._unita_testo(""), 0)
 
-    def test_senza_cifre_uguale_alla_lunghezza(self):
+    def test_lettere_e_spazi_uguali_alla_lunghezza(self):
         for testo in (
-            "Preferisco Linux per i server.",
+            "Preferisco Linux per i server",
             "   \t\n  ",
-            ".,;:!?()[]{}<>'\"-_/\\|@#$%^&*+=~`",
-            "def f(x):\n\treturn {'k': [x]}  # ok!",
-            "SELECT nome FROM utenti WHERE attivo = TRUE;",
+            "SELECT nome FROM utenti WHERE attivo TRUE",
         ):
             with self.subTest(testo=testo):
                 self.assertEqual(chat._unita_testo(testo), len(testo))
 
-    def test_unicode_non_numerico_un_unita_per_carattere(self):
+    def test_punteggiatura_due_unita(self):
+        # E16: la punteggiatura ASCII (string.punctuation) pesa 2.
+        punteggiatura = ".,;:!?()[]{}<>'\"-_/\\|@#$%^&*+=~`"
+        self.assertEqual(chat._unita_testo(punteggiatura), 2 * len(punteggiatura))
+        codice = "def f(x):\n\treturn {'k': [x]}  # ok!"
+        self.assertEqual(chat._unita_testo(codice), len(codice) + 12)
+
+    def test_unicode_due_unita_per_byte_utf8(self):
+        # E16: à è ì ò ù ñ ß 2 byte -> 4; € 漢 字 3 byte -> 6; 😀 4 byte -> 8.
         testo = "àèìòù €漢字 ñ ß 😀"
-        self.assertEqual(chat._unita_testo(testo), len(testo))
+        self.assertEqual(chat._unita_testo(testo), 5 * 4 + 6 + 2 * 6 + 4 + 4 + 8 + 4)
+        self.assertEqual(
+            chat._unita_testo(testo),
+            2 * len(testo.encode("utf-8")) - sum(1 for c in testo if c.isascii()),
+        )
 
     def test_cifre_unicode_non_ascii_non_pesate(self):
-        # Apici, cifre arabo-indiane e devanagari: solo ASCII 0-9 pesa 3.
-        self.assertEqual(chat._unita_testo("²³٣४"), 4)
+        # Apici, cifre arabo-indiane e devanagari non sono cifre ASCII:
+        # seguono la regola Unicode (2 unità per byte), non il peso 3.
+        self.assertEqual(chat._unita_testo("²³٣४"), 4 + 4 + 4 + 6)
 
     def test_messaggio_dict(self):
         self.assertEqual(chat._costo_cronologia(_user("a1")), 4)
@@ -446,12 +465,222 @@ class TestCostoCronologia(unittest.TestCase):
 
     def test_tool_call_nome_e_argomenti_pesati(self):
         messaggio = _tool_call("elimina_memoria", {"memory_id": 123})
-        # nome: 15 lettere/underscore; argomenti "{'memory_id': 123}": 18 caratteri, 3 cifre.
-        self.assertEqual(chat._costo_cronologia(messaggio), 15 + 18 + 2 * 3)
+        # nome: 14 lettere + "_" (2); argomenti "{'memory_id': 123}":
+        # 18 caratteri, 6 di punteggiatura (+1 ciascuno), 3 cifre (+2 ciascuna).
+        self.assertEqual(chat._costo_cronologia(messaggio), (14 + 2) + (18 + 6 + 2 * 3))
 
     def test_vecchi_nomi_rimossi(self):
         self.assertFalse(hasattr(chat, "MAX_CARATTERI_CRONOLOGIA"))
         self.assertFalse(hasattr(chat, "_dimensione_messaggio"))
+
+
+class TestPesiE16(unittest.TestCase):
+    """Pesi esatti della policy E16 per carattere e per sequenza."""
+
+    def test_ascii_altro_un_unita(self):
+        for carattere in ("a", "Z", " ", "\n", "\t", "\r", "\x00", "\x7f"):
+            with self.subTest(carattere=repr(carattere)):
+                self.assertEqual(chat._unita_testo(carattere), 1)
+
+    def test_ogni_punteggiatura_ascii_due_unita(self):
+        for carattere in string.punctuation:
+            with self.subTest(carattere=carattere):
+                self.assertEqual(chat._unita_testo(carattere), 2)
+
+    def test_ogni_cifra_ascii_tre_unita(self):
+        for carattere in "0123456789":
+            with self.subTest(carattere=carattere):
+                self.assertEqual(chat._unita_testo(carattere), 3)
+
+    def test_non_ascii_due_unita_per_byte(self):
+        casi = {
+            "é": 4,            # 2 byte
+            "ж": 4,            # cirillico, 2 byte
+            "ب": 4,            # arabo, 2 byte
+            "\u0301": 4,       # segno combinante, 2 byte
+            "²": 4,            # cifra non ASCII, 2 byte
+            "٣": 4,            # cifra arabo-indiana, 2 byte
+            "漢": 6,           # CJK, 3 byte
+            "€": 6,            # 3 byte
+            "४": 6,            # cifra devanagari, 3 byte
+            "１": 6,            # cifra a larghezza piena, 3 byte
+            "\ue000": 6,       # uso privato BMP, 3 byte
+            "😀": 8,           # emoji, 4 byte
+            "\U00020000": 8,   # CJK ext B, 4 byte
+            "\U000f0000": 8,   # uso privato astrale, 4 byte
+        }
+        for carattere, atteso in casi.items():
+            with self.subTest(carattere=repr(carattere)):
+                self.assertEqual(len(carattere.encode("utf-8")) * 2, atteso)
+                self.assertEqual(chat._unita_testo(carattere), atteso)
+
+    def test_surrogato_isolato_contato_senza_errori(self):
+        # Una stringa Python può contenere surrogati isolati: 3 byte, mai un'eccezione.
+        self.assertEqual(chat._unita_testo("\ud83d"), 6)
+        self.assertEqual(chat._unita_testo("a\udc00b"), 1 + 6 + 1)
+
+    def test_sequenza_di_15_senza_bonus(self):
+        self.assertEqual(chat._unita_testo("a" * 15), 15)
+        self.assertEqual(chat._unita_testo("Ab3" * 5), 10 + 5 * 3)
+
+    def test_sequenza_di_16_bonus_sulle_lettere(self):
+        self.assertEqual(chat._unita_testo("a" * 16), 32)
+        self.assertEqual(chat._unita_testo("a" * 40), 80)
+
+    def test_sequenza_mista_bonus_solo_sulle_lettere(self):
+        # 8 lettere (1 + bonus 1) e 8 cifre (3, nessun bonus).
+        self.assertEqual(chat._unita_testo("abcdefgh12345678"), 8 * 2 + 8 * 3)
+
+    def test_sequenza_di_sole_cifre_nessun_bonus(self):
+        self.assertEqual(chat._unita_testo("1" * 16), 48)
+        self.assertEqual(chat._unita_testo("9" * 100), 300)
+
+    def test_sequenze_separate_da_punteggiatura(self):
+        self.assertEqual(chat._unita_testo("a" * 16 + "-" + "b" * 16), 32 + 2 + 32)
+        # Ognuna sotto 16: nessun bonus, anche se insieme superano 16.
+        self.assertEqual(chat._unita_testo("a" * 10 + "_" + "b" * 10), 10 + 2 + 10)
+        self.assertEqual(chat._unita_testo("a" * 10 + " " + "b" * 10), 21)
+
+    def test_non_ascii_interrompe_la_sequenza(self):
+        self.assertEqual(chat._unita_testo("a" * 10 + "é" + "a" * 10), 10 + 4 + 10)
+
+    def test_hash_e_base64_pesati_oltre_la_lunghezza(self):
+        sha = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        base64 = "QXN0ZXIgaGlzdG9yeSB0b2tlbiBidWRnZXQgdjIgdGVzdCBjb3JwdXM"
+        for testo in (sha, base64):
+            with self.subTest(testo=testo[:12]):
+                self.assertGreater(chat._unita_testo(testo), 1.5 * len(testo))
+
+    def test_tool_call_dict_e_oggetto_ollama_stesso_costo(self):
+        argomenti = {"path": "Documenti/项目/报告_2026.txt"}
+        oggetto = _tool_call("read_file", argomenti)
+        dizionario = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"function": {"name": "read_file", "arguments": argomenti}}],
+        }
+        atteso = chat._unita_testo("read_file") + chat._unita_testo(str(argomenti))
+        self.assertEqual(chat._costo_cronologia(oggetto), atteso)
+        self.assertEqual(chat._costo_cronologia(dizionario), atteso)
+        # Nome e argomenti pesati con E16: i caratteri CJK del path valgono 6.
+        self.assertGreater(atteso, len("read_file") + len(str(argomenti)) + 4 * 5)
+
+    def test_contenuto_e_tool_call_sommati(self):
+        messaggio = SimpleNamespace(
+            role="assistant",
+            content="漢",
+            tool_calls=[SimpleNamespace(function=SimpleNamespace(name="x", arguments={"k": 1}))],
+        )
+        self.assertEqual(chat._costo_cronologia(messaggio), 6 + 1 + chat._unita_testo("{'k': 1}"))
+
+
+# Corpus deterministico (nessun modello): una voce per classe.
+CORPUS_E16 = {
+    "italiano": "Ieri ho sistemato il server: però la cartella delle foto è stata saltata, perché?",
+    "codice": "def media(valori):\n    return sum(valori) / len(valori) if valori else None\n",
+    "numeri": "Fattura 2026-0915: totale 1.284,50 euro, IVA 22% pari a 231,63 euro.",
+    "cjk comune": "今天我修改了服务器的配置，并且更新了项目的文档。",
+    "cjk raro": "龘靐齉爩鱻麤龖龗驫灥飝厵癵籱鸝鬱",
+    "emoji": "😀😂👍🎉🔥💡🚀✅🙏🤔",
+    "astrale": "\U00020000\U00020001\U0002a6d0\U00020b9f",
+    "arabo": "قمت اليوم بتعديل إعدادات الخادم وتحديث وثائق المشروع",
+    "cirillico": "Сегодня я изменил настройки сервера и обновил документацию",
+    "accenti europei": "Ich habe gestern einen spannenden Artikel über künstliche Intelligenz gelesen",
+    "zalgo": "a\u0301\u0302\u0303\u0304\u0305e\u0306\u0307\u0308\u0309\u030a",
+    "uso privato": "\ue000\ue001\uf8ff\U000f0000\U000f0001",
+    "base64/hash": "QXN0ZXIgaGlzdG9yeSB0b2tlbiBidWRnZXQ 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822c",
+}
+
+
+def _byte_non_ascii(testo):
+    return sum(len(c.encode("utf-8")) for c in testo if not c.isascii())
+
+
+class TestCorpusE16(unittest.TestCase):
+    """Proprietà deterministiche E16 su un corpus rappresentativo (nessun token Qwen hardcoded)."""
+
+    def test_ogni_byte_non_ascii_pesa_almeno_due_unita(self):
+        # Base del limite: un tokenizer BPE a byte usa al più un token per
+        # byte, quindi il testo non ASCII resta sotto 0.5 token per unità.
+        for classe, testo in CORPUS_E16.items():
+            with self.subTest(classe=classe):
+                self.assertGreaterEqual(chat._unita_testo(testo), 2 * _byte_non_ascii(testo))
+                self.assertGreaterEqual(chat._unita_testo(testo), len(testo))
+
+    def test_testo_interamente_non_ascii_esatto(self):
+        for classe in ("cjk raro", "emoji", "astrale", "zalgo", "uso privato"):
+            testo = CORPUS_E16[classe]
+            with self.subTest(classe=classe):
+                ascii_ = sum(1 for c in testo if c.isascii())
+                self.assertEqual(chat._unita_testo(testo), ascii_ + 2 * _byte_non_ascii(testo))
+
+    def test_cjk_e_astrale_pesano_molto_piu_della_prosa(self):
+        italiano = chat._unita_testo(CORPUS_E16["italiano"]) / len(CORPUS_E16["italiano"])
+        for classe, minimo in (("cjk comune", 5.5), ("cjk raro", 6), ("astrale", 8)):
+            testo = CORPUS_E16[classe]
+            with self.subTest(classe=classe):
+                self.assertGreaterEqual(chat._unita_testo(testo) / len(testo), minimo)
+                self.assertGreater(chat._unita_testo(testo) / len(testo), 4 * italiano)
+
+    def test_cirillico_e_arabo_quattro_unita_per_lettera(self):
+        for classe in ("cirillico", "arabo"):
+            testo = CORPUS_E16[classe]
+            lettere = sum(1 for c in testo if not c.isascii())
+            spazi = sum(1 for c in testo if c.isascii())
+            with self.subTest(classe=classe):
+                self.assertEqual(chat._unita_testo(testo), 4 * lettere + spazi)
+
+    def test_base64_e_hash_con_bonus(self):
+        testo = CORPUS_E16["base64/hash"]
+        senza_bonus = len(testo) + 2 * sum(testo.count(c) for c in "0123456789")
+        self.assertGreater(chat._unita_testo(testo), senza_bonus)
+
+
+class TestNonRegressioneItaliano(unittest.TestCase):
+    """La prosa italiana normale cresce solo per accenti e punteggiatura, non come il CJK."""
+
+    PROSA = (
+        "Ieri sera ho finalmente sistemato la configurazione del server di casa: "
+        "adesso il backup parte da solo ogni notte. Però non sono sicuro che la "
+        "cartella delle foto venga inclusa, perché l'ultima volta è stata saltata. "
+        "Domani proverò a controllare i log e, se serve, cambierò le impostazioni "
+        "del programma. Mi ricordi anche di comprare il caffè e di chiamare Giulia "
+        "per la cena di venerdì?"
+    )
+
+    def test_aumento_solo_da_accenti_e_punteggiatura(self):
+        punteggiatura = sum(1 for c in self.PROSA if c in string.punctuation)
+        accentati = sum(1 for c in self.PROSA if not c.isascii())
+        cifre = sum(self.PROSA.count(c) for c in "0123456789")
+        prima = len(self.PROSA) + 2 * cifre
+
+        # Ogni accento passa da 1 a 4 unità, ogni segno da 1 a 2; nient'altro.
+        self.assertEqual(chat._unita_testo(self.PROSA), prima + punteggiatura + 3 * accentati)
+        self.assertLessEqual(chat._unita_testo(self.PROSA), 1.15 * prima)
+
+    def test_conversazione_italiana_conserva_gli_stessi_turni(self):
+        conversazione = []
+        for indice in range(30):
+            conversazione += [_user(f"Domanda {indice}: come procedo?"), _assistant(self.PROSA)]
+        conversazione.append(_user("corrente"))
+
+        messaggi = _limita(conversazione)
+
+        # Con budget 4000 restano 8 turni da ~430 unità: la prosa non viene
+        # moltiplicata come il testo CJK.
+        self.assertEqual(_turni_precedenti(messaggi), 8)
+        self.assertLessEqual(_costo_totale(messaggi), MAX_UNITA_CRONOLOGIA)
+
+    def test_cjk_della_stessa_lunghezza_conserva_meno_turni(self):
+        cjk = (CORPUS_E16["cjk comune"] * 20)[:len(self.PROSA)]
+        italiano = [x for i in range(30) for x in (_user(f"d{i}"), _assistant(self.PROSA))]
+        cinese = [x for i in range(30) for x in (_user(f"d{i}"), _assistant(cjk))]
+
+        turni_italiano = _turni_precedenti(_limita([*italiano, _user("corrente")]))
+        turni_cinese = _turni_precedenti(_limita([*cinese, _user("corrente")]))
+
+        self.assertLess(turni_cinese, turni_italiano)
+        self.assertEqual(turni_cinese, 1)
 
 
 class TestBudgetPesato(unittest.TestCase):
