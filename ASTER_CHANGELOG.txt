@@ -720,3 +720,244 @@ Stato
 
 Serie 0.6 completata. Release candidate in attesa di approvazione
 finale, merge su main e tag.
+
+---
+
+v0.7.1a - Runtime Paths Foundation
+
+Obiettivo
+
+Introdurre tre radici distinte per preparare la futura portabilita'
+(sorgente, venv, eseguibile) senza spostare dati o comportamento
+della release 0.6.8.
+
+* Nuovo modules/runtime_paths.py: APP_ROOT (base delle allowed roots
+  relative), RESOURCE_ROOT (prompt e config.default.json) e DATA_ROOT
+  (memoria, cestino, backup, config utente).
+* Da sorgente le tre radici restano equivalenti alla baseline 0.6.8:
+  nessuno spostamento di prompt o memoria.
+* Modalita' frozen (PyInstaller) gestite ma non ancora attivate:
+  portable.txt per la variante portatile, altrimenti directory dati
+  utente del sistema operativo.
+* Il resolver non crea directory, non scrive e non migra dati; nessun
+  fallback alla cwd per input non validi.
+
+v0.7.1b - Layered Configuration
+
+Obiettivo
+
+Separare configurazione app-owned (sempre presente) da un override
+utente opzionale e ridurre il debito della doppia lettura della
+configurazione in avvio.
+
+* config.default.json (RESOURCE_ROOT): default completo e
+  obbligatorio. DATA_ROOT/config.json: override opzionale, assente
+  per default; se presente ma non valido blocca l'avvio.
+* Whitelist utente di sole 5 foglie: ollama.model, ollama.host,
+  ollama.timeout, ollama.num_ctx, tools.filesystem.allowed_roots.
+* L'override di num_ctx non puo' scendere sotto il default (8192).
+* aster.py carica e valida la configurazione una sola volta tramite
+  carica_config_runtime: risolto il debito storico della doppia
+  lettura in avvia_chat.
+
+v0.7.1c - Reserved Data Root
+
+Obiettivo
+
+Impedire che i tool filesystem generici (list_directory, read_file)
+raggiungano memoria, cestino, backup o config utente dentro
+DATA_ROOT, anche quando l'utente autorizza tutta APP_ROOT.
+
+* reserved_roots diventa parametro keyword-only obbligatorio di
+  filesystem_policy: nessun default implicito che dimentichi la
+  protezione.
+* aster.py impone reserved_roots=(percorsi.data_root,); la
+  configurazione utente non puo' rimuoverla.
+* Identita' verificata con (st_dev, st_ino) di target e antenati:
+  copre rappresentazioni alternative della stessa directory (incluse
+  quelle Windows che il solo confronto testuale non riconosce).
+  Reserved non verificabili o identita' non affidabili -> deny
+  (fail-closed).
+* Residui noti, non chiusi da questo step: un hard link esterno verso
+  un singolo file interno a DATA_ROOT; rischio TOCTOU tra validazione
+  e uso reale del path.
+* Suite completa riportata: 565/565 PASS (due test rimossi perche'
+  richiedevano il successo di bypass noti, mai comportamento
+  desiderato).
+
+v0.7.2a - Hardware System Snapshot
+
+Obiettivo
+
+Arricchire get_system_info con dati hardware reali (CPU, RAM, uptime)
+mantenendo lo stesso contratto senza parametri.
+
+* CPU model letto da registro Windows (ProcessorNameString) con
+  fallback a platform.processor(); stringa ripulita, dato assente ->
+  null.
+* Nuova struttura cpu (model, physical_cores, logical_processors,
+  usage_percent) al posto dei vecchi campi top-level cpu_count e
+  processor: core fisici e processori logici restano distinti, mai
+  dedotti l'uno dall'altro.
+* RAM (memory): una sola lettura psutil.virtual_memory(), byte interi
+  non negativi, percentuale finita in [0,100].
+* uptime_seconds e uptime_breakdown (days/hours/minutes) calcolati in
+  Python da psutil.boot_time(); valori anomali -> null.
+* Ogni metrica fallisce separatamente: un errore CPU o RAM non toglie
+  gli altri blocchi del risultato.
+
+v0.7.2b - GPU Awareness / VRAM
+
+Obiettivo
+
+Aggiungere nome scheda video e VRAM dedicata totale a get_system_info,
+senza introdurre un nuovo tool ne' dipendenze aggiuntive.
+
+* Nuovo modulo modules/gpu_info.py: backend DXGI via stdlib ctypes
+  (dxgi.dll caricata solo all'uso, LOAD_LIBRARY_SEARCH_SYSTEM32),
+  disponibile solo su Windows a processo 64 bit.
+* Campo gpu mai null: info_available=true con adapters (anche lista
+  vuota se non c'e' hardware) oppure info_available=false con lista
+  vuota su piattaforma non supportata o errore, senza testo di
+  eccezione.
+* Enumerazione limitata a 16 adapter prima del filtro software (solo
+  tramite DXGI_ADAPTER_FLAG_SOFTWARE, mai dal nome); un 17-esimo
+  adapter o un errore invalida l'intera enumerazione.
+* Esposti solo nome (ripulito, null se vuoto/non stringa/con
+  caratteri di controllo) e dedicated_memory_bytes (intero non
+  negativo, bool escluso); nessun LUID, vendor/device ID, driver o
+  memoria condivisa.
+* GPU reale osservata in sviluppo: RTX 3060 Ti, 8413773824 byte di
+  memoria dedicata (dato del PC di sviluppo, non una costante di
+  produzione).
+* Routing reale riportato dall'implementazione: 57/57 casi attesi su
+  qwen3:8b (GPU reale, domande teoriche, metriche non disponibili,
+  fixture multi-GPU/assente, regressioni di dominio).
+
+Hardening - Budget cronologia per densita' di cifre
+
+* Il budget della cronologia (prima 6000 caratteri) sottostimava il
+  costo reale quando il testo e' denso di cifre (es. byte VRAM appena
+  esposti da 0.7.2b): un tokenizer tratta una cifra come circa un
+  token intero.
+* Sostituito con unita' pesate: cifra ASCII 0-9 = 3 unita', altro
+  carattere = 1; nuovo MAX_UNITA_CRONOLOGIA = 4000 al posto del
+  precedente limite in caratteri puri. Soglie di compattazione tool
+  (1000) e risposta (2000) restano in caratteri.
+
+v0.7.2c - Local volume inventory
+
+Obiettivo
+
+Aggiungere un tool in sola lettura per lo spazio delle unita' locali
+fisse di Windows (non solo il filesystem di Aster).
+
+* Nuovo tool list_local_volumes (dominio system, READ_ONLY, senza
+  parametri) e nuovo modulo modules/volume_info.py.
+* Backend: stdlib ctypes su kernel32 (GetLogicalDrives,
+  GetDriveTypeW) + shutil.disk_usage; filtra solo le unita' che
+  Windows classifica DRIVE_FIXED (non garanzia di disco interno:
+  alcuni USB risultano DRIVE_FIXED).
+* Output: volumes[] (al massimo 8, ordine alfabetico A->Z dalla
+  maschera di bit di GetLogicalDrives), total (conta tutte le fisse),
+  truncated, fullest_drive (used_percent piu' alto, null se elenco
+  troncato/vuoto/senza volumi leggibili).
+* Una singola unita' illeggibile resta in elenco con
+  info_available=false; nessuna conversione GiB/TiB nel dato grezzo
+  (solo nel fallback testuale).
+* prompt.txt aggiornato con la disambiguazione rispetto a
+  get_disk_usage (che resta per il solo filesystem di Aster).
+* Tool totali: 13 (system passa da 3 a 4).
+
+Hardening - Ottimizzazione testuale prompt e tool
+
+* Compressione di prompt.txt e delle description dei tool memoria,
+  filesystem e sistema per recuperare margine di context budget dopo
+  la crescita di schema/prompt portata da 0.7.2c.
+* Solo testo: nessuna modifica a parametri, validazione o
+  comportamento dei tool.
+
+Hardening - Secret guard per OTP, PIN e CVV in forma compatta
+
+* Il Secret Guard della memoria non intercettava PIN/CVV/OTP scritti
+  in forma compatta (es. "OTP 582913", senza copula "e'/sono").
+* Nuovo ramo regex "adiacente": parola chiave + separatore semplice
+  (: = # - - --) + valore, accanto al ramo storico con copula.
+* OTP esteso a sinonimi (one-time password, codice monouso,
+  verification code) e al formato a blocchi "123 456".
+
+Hardening - Secret guard per recovery/backup code
+
+* Stesso schema di rilevamento esteso a recovery/backup code e
+  recovery key, non ancora coperti dal pattern storico generico.
+* Riconosce gruppi alfanumerici 4-8 separati da trattino o da spazio
+  singolo, oppure 8-12 cifre contigue, ancorati a parola chiave
+  (recovery/backup code, recovery key, codici di recupero/backup,
+  chiavi di recupero/ripristino). Si aggiunge al controllo storico,
+  che resta invariato.
+
+v0.7.2d - Process CPU and RAM metrics
+
+Obiettivo
+
+Mostrare uso di CPU e RAM per processo, cambiando il contratto di
+list_processes da elenco per PID a gruppi per nome programma.
+
+* Nuovo modulo modules/process_info.py: backend Win32 documentato via
+  stdlib ctypes (OpenProcess con PROCESS_QUERY_LIMITED_INFORMATION,
+  GetProcessTimes, K32GetProcessMemoryInfo, CloseHandle). Nessun
+  PROCESS_VM_READ, subprocess, PowerShell o WMI.
+* list_processes ora raggruppa per nome processo: niente piu' PID in
+  output. Ogni gruppo espone name (troncato a 40 unita' pesate),
+  instances e, se misurabile, cpu_percent + memory_bytes; altrimenti
+  un marcatore metrics="protected_process"/"not_available".
+* Nuovo parametro opzionale sort ("cpu"/"memory", default "memory") e
+  nuovi campi aggregati top_cpu, top_memory e metrics_unavailable,
+  calcolati su tutti i gruppi corrispondenti prima del troncamento.
+  Solo top_cpu richiede un valore positivo: e' null se nessun gruppo
+  misurabile ha CPU > 0 (tutti a 0%). top_memory non ha questo
+  vincolo e individua il gruppo con piu' RAM anche quando il valore
+  e' 0 byte.
+* MAX_PROCESS_ENTRIES passa da 50 (PID) a 20 (gruppi).
+* Identita' del processo verificata con il FILETIME di creazione
+  letto prima e dopo la lettura del nome, per escludere PID riusati
+  durante la misura; psutil.process_iter.cache_clear() chiamato per
+  evitare nomi cache stantii tra una chiamata e l'altra.
+* prompt.txt per list_processes non era stato aggiornato in questo
+  commit: colmato separatamente (vedi sotto) con esempi per sort,
+  raggruppamento, top_cpu/top_memory e metrics_unavailable.
+
+Hardening - Budget cronologia per testo Unicode (policy E16)
+
+* Il peso "1 unita' per carattere" introdotto nell'hardening post
+  0.7.2b sottostimava il costo reale di testo non ASCII (es. nomi
+  processo internazionali esposti da 0.7.2d) per un tokenizer BPE a
+  byte.
+* Nuovo schema: ASCII cifra=3, punteggiatura (string.punctuation)=2,
+  altro ASCII=1; non ASCII = 2 unita' per byte UTF-8 (surrogati
+  isolati gestiti via surrogatepass, mai un'eccezione); +1 extra per
+  lettera ASCII in sequenze alfanumeriche >= 16 caratteri contigue
+  (hash/base64/token). MAX_UNITA_CRONOLOGIA resta 4000.
+
+Aggiornamento prompt.txt - contratto list_processes (2026-10-12)
+
+* Aggiunta la disambiguazione mancante dal commit 0.7.2d: sort
+  esplicito per CPU/RAM, semantica di raggruppamento (instances,
+  niente PID), uso di top_cpu/top_memory anche con elenco parziale,
+  e avviso di non inventare valori per i gruppi non misurabili.
+
+Verifica corrente (2026-10-12, ambiente .venv reale)
+
+* 1138 test eseguiti: 1138 passati, 0 saltati, 0 errori
+  (tests/test_*.py via unittest discover).
+* compileall su modules, tests e aster.py: PASS.
+* Tool: 13 (7 memoria, 4 sistema, 2 filesystem).
+* git status pulito a parte AGENTS.md (gia' presente, non ancora
+  tracciato) durante questa verifica.
+
+Nota
+
+Questa voce documenta retroattivamente i commit gia' presenti su
+dev/v0.7.1 (da v0.7.1a a HEAD) che non erano ancora stati registrati
+nel changelog. Non introduce ne' autorizza alcun nuovo step di
+sviluppo.
