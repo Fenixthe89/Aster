@@ -8,7 +8,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from modules import gpu_info, process_info, volume_info
+from modules import app_info, gpu_info, process_info, volume_info
 from modules.tool_registry import RegistroStrumenti, ToolSpec
 
 # Import protetto: se psutil manca, Aster parte comunque; list_processes
@@ -28,6 +28,10 @@ except ImportError:
 # list_processes: il risultato entra in role="tool" e resta in
 # cronologia, quindi va tenuto contenuto.
 MAX_PROCESS_ENTRIES = 20
+
+# Limite di applicazioni restituite da list_installed_applications,
+# dopo filtro e deduplicazione (stesso motivo di MAX_PROCESS_ENTRIES).
+MAX_INSTALLED_APPS = 50
 
 # Finestra di campionamento di cpu_percent: con interval=None le
 # chiamate di un processo appena avviato o ravvicinate restituiscono
@@ -74,6 +78,9 @@ _ERRORE_ORDINAMENTO_NON_VALIDO = "Ordinamento non valido: usa cpu oppure memory.
 
 _ERRORE_VOLUMI_NON_SUPPORTATI = "L'elenco delle unità locali è disponibile solo su Windows."
 _ERRORE_VOLUMI = "Non sono riuscito a elencare le unità locali."
+
+_ERRORE_APP_NON_SUPPORTATE = "L'elenco delle applicazioni installate è disponibile solo su Windows."
+_ERRORE_APP = "Non sono riuscito a leggere l'elenco delle applicazioni installate."
 
 TOOLS_SISTEMA = [
     {
@@ -157,6 +164,35 @@ TOOLS_SISTEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_installed_applications",
+            "description": (
+                "Applicazioni installate su Windows secondo il registro "
+                "(nome, versione, produttore). Sola lettura: non avvia, "
+                "installa o disinstalla nulla. Elenco non necessariamente "
+                "completo: non copre app Microsoft Store/UWP né programmi "
+                "portatili senza installer."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Opzionale: breve nome o frammento del nome "
+                            "dell'applicazione da cercare (es. chrome, "
+                            "office, steam). Confronto senza distinzione "
+                            "maiuscole/minuscole. Ometti per l'elenco "
+                            "generale."
+                        ),
+                    },
+                },
                 "required": [],
             },
         },
@@ -484,7 +520,8 @@ def _errore_list_processes(messaggio: str) -> dict:
 
 def _normalizza_filtro_nome(valore) -> tuple[bool, str | None]:
     """
-    Valida il parametro opzionale name di list_processes.
+    Valida il parametro opzionale name di list_processes e
+    list_installed_applications (stesso contratto per entrambi).
 
     Restituisce (valido, filtro). None, "" o soli spazi significano
     nessun filtro (filtro=None), così come le sole sentinelle esatte
@@ -832,6 +869,85 @@ def list_local_volumes(argomenti: dict, contesto) -> dict:
     }
 
 
+def _errore_list_installed_applications(status: str, messaggio: str) -> dict:
+    """Errore di list_installed_applications con messaggio fisso (mai testo di eccezioni)."""
+
+    return {
+        "ok": False,
+        "operation": "list_installed_applications",
+        "status": status,
+        "error": messaggio,
+    }
+
+
+def list_installed_applications(argomenti: dict, contesto) -> dict:
+    """
+    Handler del tool list_installed_applications.
+
+    Sola lettura delle chiavi Uninstall del registro Windows (vista a
+    64 bit e vista a 32 bit di HKLM tramite KEY_WOW64_64KEY/32KEY, HKCU
+    per l'utente corrente): nessuna esecuzione, nessun subprocess/PowerShell/WMI,
+    nessuna lettura di filesystem. Il filtro name si applica al nome
+    completo, prima del conteggio totale e del troncamento, con lo
+    stesso contratto di list_processes (sottostringa case-insensitive,
+    nessuna regex). app_info restituisce l'elenco già deduplicato
+    (repliche effettive della stessa installazione tra viste diverse,
+    mai applicazioni diverse con nome simile); qui si applicano solo
+    filtro, conteggio e troncamento a MAX_INSTALLED_APPS. Non espone
+    percorsi di installazione, comandi di disinstallazione, username o
+    chiavi di registro. sources_unavailable conta le radici del
+    registro non apribili o la cui enumerazione si è interrotta prima
+    della fine naturale (errore reale o limite di sicurezza
+    raggiunto), mai le viste semplicemente assenti su questo sistema
+    (es. nessuna installazione per-utente): un valore maggiore di zero
+    segnala un elenco potenzialmente incompleto, oltre ai limiti noti
+    strutturali (app Store/UWP e programmi portatili, mai coperti). Se
+    l'elenco risultante è vuoto ma sources_unavailable > 0, l'assenza
+    non è verificata: il fallback lo segnala esplicitamente invece di
+    affermare che non ci sono applicazioni. Piattaforma non Windows ->
+    unsupported_platform; errore imprevisto -> tool_error; sempre
+    messaggi fissi.
+    """
+
+    argomenti = argomenti if isinstance(argomenti, dict) else {}
+
+    valido, filtro = _normalizza_filtro_nome(argomenti.get("name"))
+    if not valido:
+        return _errore_list_installed_applications("tool_error", _ERRORE_FILTRO_NON_VALIDO)
+
+    try:
+        risultato = app_info.leggi_applicazioni_installate()
+    except app_info.PiattaformaNonSupportata:
+        return _errore_list_installed_applications(
+            "unsupported_platform", _ERRORE_APP_NON_SUPPORTATE
+        )
+    except Exception:
+        return _errore_list_installed_applications("tool_error", _ERRORE_APP)
+
+    applicazioni = risultato.applicazioni
+    if filtro is not None:
+        filtro_casefold = filtro.casefold()
+        applicazioni = [
+            app for app in applicazioni
+            if filtro_casefold in app["name"].casefold()
+        ]
+
+    totale = len(applicazioni)
+
+    return {
+        "ok": True,
+        "operation": "list_installed_applications",
+        "status": "success",
+        "data": {
+            "applications": applicazioni[:MAX_INSTALLED_APPS],
+            "name_filter": filtro,
+            "total": totale,
+            "truncated": totale > MAX_INSTALLED_APPS,
+            "sources_unavailable": risultato.sorgenti_non_disponibili,
+        },
+    }
+
+
 _NON_DISPONIBILE = "non disponibile"
 
 
@@ -1111,6 +1227,90 @@ def _fallback_list_local_volumes(risultato_tool: dict) -> str:
     return "\n".join(righe)
 
 
+def _riga_applicazione(app) -> str:
+    """Riga del fallback per una singola applicazione (mai path/comandi, solo nome/versione/produttore)."""
+
+    if not isinstance(app, dict):
+        app = {}
+
+    nome = app.get("name")
+    if not isinstance(nome, str) or not nome:
+        nome = "Applicazione senza nome"
+
+    dettagli = []
+    versione = app.get("version")
+    if isinstance(versione, str) and versione:
+        dettagli.append(f"versione {versione}")
+    produttore = app.get("publisher")
+    if isinstance(produttore, str) and produttore:
+        dettagli.append(produttore)
+
+    if dettagli:
+        return f"- {nome} ({', '.join(dettagli)})"
+    return f"- {nome}"
+
+
+def _fallback_list_installed_applications(risultato_tool: dict) -> str:
+    """Fallback deterministico dedicato a list_installed_applications."""
+
+    status = risultato_tool.get("status")
+    if status == "unsupported_platform":
+        return risultato_tool.get("error") or _ERRORE_APP_NON_SUPPORTATE
+    if status != "success":
+        return risultato_tool.get("error") or _ERRORE_APP
+
+    data = risultato_tool.get("data")
+    data = data if isinstance(data, dict) else {}
+    applicazioni = data.get("applications")
+    applicazioni = applicazioni if isinstance(applicazioni, list) else []
+    filtro = data.get("name_filter")
+    totale = _intero_non_negativo(data.get("total"))
+    if totale is None:
+        totale = len(applicazioni)
+
+    if not applicazioni:
+        if _intero_positivo(data.get("sources_unavailable")):
+            if filtro:
+                return (
+                    f'Non ho trovato applicazioni corrispondenti al filtro "{filtro}", ma '
+                    "una parte del registro non è stata letta per intero: non posso "
+                    "escludere che ce ne siano."
+                )
+            return (
+                "Una parte del registro delle applicazioni installate non è stata letta "
+                "per intero: non posso confermare se non ci sono applicazioni installate "
+                "o se l'elenco è solo incompleto."
+            )
+        if filtro:
+            return f'Nessuna applicazione installata corrisponde al filtro "{filtro}".'
+        return "Nessuna applicazione installata trovata nel registro di Windows."
+
+    if filtro:
+        intestazione = f'Applicazioni corrispondenti al filtro "{filtro}": {totale}'
+    else:
+        intestazione = (
+            f"Applicazioni installate secondo il registro di Windows: {totale} "
+            "(elenco non necessariamente completo: non copre app Microsoft "
+            "Store/UWP né programmi portatili)"
+        )
+
+    righe = [intestazione]
+    righe.extend(_riga_applicazione(app) for app in applicazioni)
+
+    if data.get("truncated") is True:
+        righe.append(
+            f"Elenco parziale: mostrate {len(applicazioni)} applicazioni su {totale}."
+        )
+
+    if _intero_positivo(data.get("sources_unavailable")):
+        righe.append(
+            "Attenzione: una parte del registro non è stata leggibile, "
+            "l'elenco potrebbe essere incompleto anche oltre i limiti noti."
+        )
+
+    return "\n".join(righe)
+
+
 def fallback_deterministico_sistema(risultato_tool: dict) -> str:
     """
     Router del fallback deterministico per il dominio "system".
@@ -1133,6 +1333,9 @@ def fallback_deterministico_sistema(risultato_tool: dict) -> str:
 
     if operation == "list_local_volumes":
         return _fallback_list_local_volumes(risultato_tool)
+
+    if operation == "list_installed_applications":
+        return _fallback_list_installed_applications(risultato_tool)
 
     if risultato_tool.get("status") != "success":
         return (
@@ -1181,6 +1384,16 @@ def registra_tool_sistema(registro: RegistroStrumenti) -> None:
             nome="list_local_volumes",
             schema=TOOLS_SISTEMA[3],
             handler=list_local_volumes,
+            livello="READ_ONLY",
+            dominio="system",
+        )
+    )
+
+    registro.registra(
+        ToolSpec(
+            nome="list_installed_applications",
+            schema=TOOLS_SISTEMA[4],
+            handler=list_installed_applications,
             livello="READ_ONLY",
             dominio="system",
         )

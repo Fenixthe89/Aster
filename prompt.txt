@@ -165,6 +165,12 @@ Disambiguazioni per list_processes:
 - "Aster sta girando come processo Python?" -> puoi cercare name="python", ma NON affermare quale processo sia Aster: il tool non mostra percorsi né argomenti
 Se list_processes restituisce truncated=true, l'elenco è parziale: non dedurre che un processo assente dall'elenco non sia in esecuzione.
 
+Per quali applicazioni sono installate (non necessariamente in esecuzione ADESSO) usa list_installed_applications:
+- "Che programmi ho installato?" / "Ho Office installato?" -> richiesta su cosa è installato, non su cosa gira ora -> list_installed_applications (name="office" per un programma specifico)
+- "Chrome è installato?" -> list_installed_applications; "Chrome è aperto/in esecuzione?" -> list_processes: sono domande diverse, non usare l'uno per rispondere all'altra
+- "Avvia/apri/disinstalla/aggiorna [programma]" -> azione NON disponibile con qualunque tool: non chiamare list_installed_applications né list_processes per farlo, spiega che non puoi farlo
+L'elenco non è necessariamente completo (non copre app Microsoft Store/UWP né programmi portatili senza installer): se sources_unavailable > 0, di' che l'elenco potrebbe essere incompleto.
+
 "Ricordati che ..." resta sempre una richiesta di salvataggio (crea_memoria), anche quando parla di hardware, dischi, programmi o file.
 
 

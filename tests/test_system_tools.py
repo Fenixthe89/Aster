@@ -49,6 +49,8 @@ if str(BASE_DIR) not in sys.path:
 import modules.process_info as process_info
 import modules.system_tools as system_tools
 import modules.tool_response as tool_response
+from modules.app_info import PiattaformaNonSupportata as AppPiattaformaNonSupportata
+from modules.app_info import RisultatoApplicazioni
 from modules.gpu_info import AdattatoreGrafico, GpuNonDisponibile
 from modules.process_info import GruppoProcessi
 from modules.system_tools import (
@@ -56,6 +58,7 @@ from modules.system_tools import (
     fallback_deterministico_sistema,
     get_disk_usage,
     get_system_info,
+    list_installed_applications,
     list_local_volumes,
     registra_tool_sistema,
 )
@@ -182,17 +185,29 @@ class ContatoreChiamate:
 
 class TestToolsSistemaElenco(unittest.TestCase):
 
-    def test_contiene_esattamente_quattro_schemi(self):
+    def test_contiene_esattamente_cinque_schemi(self):
         nomi = {schema["function"]["name"] for schema in TOOLS_SISTEMA}
         self.assertEqual(
             nomi,
-            {"get_system_info", "get_disk_usage", "list_processes", "list_local_volumes"},
+            {
+                "get_system_info",
+                "get_disk_usage",
+                "list_processes",
+                "list_local_volumes",
+                "list_installed_applications",
+            },
         )
 
     def test_ordine_schemi_esistenti_invariato(self):
         self.assertEqual(
             [schema["function"]["name"] for schema in TOOLS_SISTEMA],
-            ["get_system_info", "get_disk_usage", "list_processes", "list_local_volumes"],
+            [
+                "get_system_info",
+                "get_disk_usage",
+                "list_processes",
+                "list_local_volumes",
+                "list_installed_applications",
+            ],
         )
 
 
@@ -272,7 +287,8 @@ class TestRegistrazioneSistema(unittest.TestCase):
         self.assertIn("get_disk_usage", nomi)
         self.assertIn("list_processes", nomi)
         self.assertIn("list_local_volumes", nomi)
-        self.assertEqual(len(nomi), 11)
+        self.assertIn("list_installed_applications", nomi)
+        self.assertEqual(len(nomi), 12)
 
     def test_nessun_tool_memoria_alterato(self):
         for nome in (
@@ -2450,13 +2466,13 @@ class TestRegistrazioneListProcesses(unittest.TestCase):
         self.assertEqual(tool_spec.livello, "READ_ONLY")
         self.assertIs(tool_spec.handler, system_tools.list_processes)
 
-    def test_memoria_piu_sistema_undici(self):
+    def test_memoria_piu_sistema_dodici(self):
         registro = crea_registro_memoria()
         registra_tool_sistema(registro)
         nomi = {s["function"]["name"] for s in registro.elenco_schema()}
-        self.assertEqual(len(nomi), 11)
+        self.assertEqual(len(nomi), 12)
 
-    def test_registro_completo_tredici(self):
+    def test_registro_completo_quattordici(self):
         from modules.file_tools import registra_tool_filesystem
 
         registro = crea_registro_memoria()
@@ -2464,7 +2480,7 @@ class TestRegistrazioneListProcesses(unittest.TestCase):
         registra_tool_filesystem(registro)
         nomi = {s["function"]["name"] for s in registro.elenco_schema()}
 
-        self.assertEqual(len(nomi), 13)
+        self.assertEqual(len(nomi), 14)
         self.assertTrue(self.NOMI_MEMORIA.issubset(nomi))
 
         domini = {}
@@ -2475,7 +2491,13 @@ class TestRegistrazioneListProcesses(unittest.TestCase):
         self.assertEqual(domini["memory"], self.NOMI_MEMORIA)
         self.assertEqual(
             domini["system"],
-            {"get_system_info", "get_disk_usage", "list_processes", "list_local_volumes"},
+            {
+                "get_system_info",
+                "get_disk_usage",
+                "list_processes",
+                "list_local_volumes",
+                "list_installed_applications",
+            },
         )
         self.assertEqual(domini["filesystem"], {"list_directory", "read_file"})
 
@@ -4542,6 +4564,409 @@ class TestPipelinePostToolListLocalVolumes(unittest.TestCase):
 
         self.assertIn("- C: 2.00 TiB totali", risposta)
         self.assertIn("- D: spazio non leggibile", risposta)
+
+
+# =====================================================================
+# 0.7.3 - list_installed_applications (backend app_info sempre
+# finto qui: il backend reale è coperto da tests/test_app_info.py)
+# =====================================================================
+
+CHIAVI_VIETATE_APP = CHIAVI_VIETATE | {
+    "install_location",
+    "installlocation",
+    "uninstall_string",
+    "uninstallstring",
+    "registry_key",
+    "registry_path",
+    "key_path",
+    "subkey",
+    "hive",
+}
+
+CAMPI_ATTESI_APP = {"name", "version", "publisher"}
+
+
+def _app(nome, versione="1.0", produttore="Produttore SpA"):
+    return {"name": nome, "version": versione, "publisher": produttore}
+
+
+def _esegui_list_installed_applications(risultato=None, eccezione=None, argomenti=None):
+    """Handler con backend app_info finto: risultato da restituire o eccezione da sollevare."""
+
+    chiamate = []
+
+    def leggi_finto():
+        chiamate.append(1)
+        if eccezione is not None:
+            raise eccezione
+        return risultato
+
+    with mock.patch.object(system_tools.app_info, "leggi_applicazioni_installate", leggi_finto):
+        esito = list_installed_applications({} if argomenti is None else argomenti, None)
+    return esito, chiamate
+
+
+def _risultato_app(applicazioni, totale=None, troncato=False, filtro=None, sorgenti_non_disponibili=0):
+    return {
+        "ok": True,
+        "operation": "list_installed_applications",
+        "status": "success",
+        "data": {
+            "applications": applicazioni,
+            "name_filter": filtro,
+            "total": len(applicazioni) if totale is None else totale,
+            "truncated": troncato,
+            "sources_unavailable": sorgenti_non_disponibili,
+        },
+    }
+
+
+class TestSchemaListInstalledApplications(unittest.TestCase):
+
+    def setUp(self):
+        self.schema = _schema_per_nome("list_installed_applications")
+        self.parametri = self.schema["function"]["parameters"]
+
+    def test_schema_valido(self):
+        self.assertEqual(self.schema["type"], "function")
+        self.assertEqual(self.schema["function"]["name"], "list_installed_applications")
+        self.assertIsInstance(self.schema["function"]["description"], str)
+        self.assertTrue(self.schema["function"]["description"].strip())
+
+    def test_name_opzionale_unico_parametro(self):
+        self.assertEqual(list(self.parametri["properties"].keys()), ["name"])
+        self.assertEqual(self.parametri["properties"]["name"]["type"], "string")
+        self.assertEqual(self.parametri.get("required"), [])
+
+    def test_descrizione_sola_lettura_e_limiti_noti(self):
+        descrizione = self.schema["function"]["description"]
+        self.assertIn("Sola lettura", descrizione)
+        self.assertIn("Store", descrizione)
+        self.assertIn("portatili", descrizione)
+
+    def test_schema_tool_esistenti_invariati(self):
+        for nome in ("get_system_info", "get_disk_usage", "list_processes", "list_local_volumes"):
+            self.assertIsNotNone(_schema_per_nome(nome))
+
+
+class TestRegistrazioneListInstalledApplications(unittest.TestCase):
+
+    def test_dominio_livello_handler(self):
+        registro = crea_registro_memoria()
+        registra_tool_sistema(registro)
+        tool_spec = registro.trova("list_installed_applications")
+
+        self.assertIsNotNone(tool_spec)
+        self.assertEqual(tool_spec.dominio, "system")
+        self.assertEqual(tool_spec.livello, "READ_ONLY")
+        self.assertIs(tool_spec.handler, system_tools.list_installed_applications)
+
+
+class TestHandlerListInstalledApplications(unittest.TestCase):
+
+    def test_successo_schema_esatto(self):
+        app = [_app("7-Zip", "26.04", "Igor Pavlov"), _app("Chrome", "155.0", "Google LLC")]
+        esito, _ = _esegui_list_installed_applications(
+            RisultatoApplicazioni(app, sorgenti_non_disponibili=0)
+        )
+
+        self.assertEqual(esito, _risultato_app(app))
+        self.assertEqual(set(esito), {"ok", "operation", "status", "data"})
+        self.assertEqual(
+            set(esito["data"]),
+            {"applications", "name_filter", "total", "truncated", "sources_unavailable"},
+        )
+        for applicazione in esito["data"]["applications"]:
+            self.assertEqual(set(applicazione), CAMPI_ATTESI_APP)
+
+    def test_lista_vuota(self):
+        esito, _ = _esegui_list_installed_applications(RisultatoApplicazioni([], 0))
+        self.assertEqual(esito, _risultato_app([]))
+
+    def test_piattaforma_non_supportata(self):
+        esito, _ = _esegui_list_installed_applications(eccezione=AppPiattaformaNonSupportata("x"))
+        self.assertEqual(
+            esito,
+            {
+                "ok": False,
+                "operation": "list_installed_applications",
+                "status": "unsupported_platform",
+                "error": "L'elenco delle applicazioni installate è disponibile solo su Windows.",
+            },
+        )
+
+    def test_errore_imprevisto_tool_error(self):
+        for eccezione in (OSError(5, "Accesso negato"), RuntimeError("y"), ValueError("z")):
+            with self.subTest(eccezione=type(eccezione).__name__):
+                esito, _ = _esegui_list_installed_applications(eccezione=eccezione)
+                self.assertEqual(
+                    esito,
+                    {
+                        "ok": False,
+                        "operation": "list_installed_applications",
+                        "status": "tool_error",
+                        "error": "Non sono riuscito a leggere l'elenco delle applicazioni installate.",
+                    },
+                )
+
+    def test_nessuna_eccezione_raw(self):
+        segreto = r"HKEY_LOCAL_MACHINE\SOFTWARE\Secret\Path"
+        for eccezione in (OSError(21, "dettaglio interno", segreto),
+                          AppPiattaformaNonSupportata(segreto)):
+            with self.subTest(eccezione=type(eccezione).__name__):
+                esito, _ = _esegui_list_installed_applications(eccezione=eccezione)
+                serializzato = json.dumps(esito, ensure_ascii=False)
+                self.assertNotIn("Secret", serializzato)
+                self.assertNotIn("dettaglio interno", serializzato)
+
+    def test_troncato_a_cinquanta(self):
+        app = [_app(f"App{i:02d}") for i in range(60)]
+        esito, _ = _esegui_list_installed_applications(RisultatoApplicazioni(app, 0))
+
+        self.assertEqual(len(esito["data"]["applications"]), 50)
+        self.assertEqual(esito["data"]["total"], 60)
+        self.assertTrue(esito["data"]["truncated"])
+
+    def test_non_troncato_a_esattamente_cinquanta(self):
+        app = [_app(f"App{i:02d}") for i in range(50)]
+        esito, _ = _esegui_list_installed_applications(RisultatoApplicazioni(app, 0))
+
+        self.assertEqual(len(esito["data"]["applications"]), 50)
+        self.assertFalse(esito["data"]["truncated"])
+
+    def test_filtro_name_applicato_prima_del_totale(self):
+        app = [_app("Google Chrome"), _app("Mozilla Firefox"), _app("Google Earth")]
+        esito, _ = _esegui_list_installed_applications(
+            RisultatoApplicazioni(app, 0), argomenti={"name": "google"}
+        )
+
+        nomi = {a["name"] for a in esito["data"]["applications"]}
+        self.assertEqual(nomi, {"Google Chrome", "Google Earth"})
+        self.assertEqual(esito["data"]["total"], 2)
+        self.assertEqual(esito["data"]["name_filter"], "google")
+        self.assertFalse(esito["data"]["truncated"])
+
+    def test_filtro_case_insensitive_sottostringa(self):
+        app = [_app("Visual Studio Code")]
+        esito, _ = _esegui_list_installed_applications(
+            RisultatoApplicazioni(app, 0), argomenti={"name": "STUDIO"}
+        )
+        self.assertEqual(len(esito["data"]["applications"]), 1)
+
+    def test_filtro_nessun_risultato(self):
+        app = [_app("Chrome")]
+        esito, _ = _esegui_list_installed_applications(
+            RisultatoApplicazioni(app, 0), argomenti={"name": "nonexistent"}
+        )
+        self.assertEqual(esito["data"]["applications"], [])
+        self.assertEqual(esito["data"]["total"], 0)
+
+    def test_filtro_non_valido_tool_error(self):
+        esito, _ = _esegui_list_installed_applications(
+            RisultatoApplicazioni([], 0), argomenti={"name": "x" * 65}
+        )
+        self.assertEqual(
+            esito,
+            {
+                "ok": False,
+                "operation": "list_installed_applications",
+                "status": "tool_error",
+                "error": "Filtro nome non valido.",
+            },
+        )
+
+    def test_filtro_assente_nullo_vuoto_nessun_filtro(self):
+        app = [_app("Chrome")]
+        for argomenti in ({}, {"name": None}, {"name": ""}, {"name": "   "}, {"name": "none"}):
+            with self.subTest(argomenti=argomenti):
+                esito, _ = _esegui_list_installed_applications(
+                    RisultatoApplicazioni(app, 0), argomenti=argomenti
+                )
+                self.assertIsNone(esito["data"]["name_filter"])
+                self.assertEqual(esito["data"]["total"], 1)
+
+    def test_sources_unavailable_propagato(self):
+        esito, _ = _esegui_list_installed_applications(RisultatoApplicazioni([], 2))
+        self.assertEqual(esito["data"]["sources_unavailable"], 2)
+
+    def test_argomenti_non_dict_non_falliscono(self):
+        with mock.patch.object(
+            system_tools.app_info, "leggi_applicazioni_installate",
+            lambda: RisultatoApplicazioni([], 0),
+        ):
+            esito = list_installed_applications(None, None)
+        self.assertTrue(esito["ok"])
+
+    def test_nessuna_chiave_privacy_vietata(self):
+        app = [_app("Chrome")]
+        esito, _ = _esegui_list_installed_applications(RisultatoApplicazioni(app, 0))
+        self.assertEqual(_tutte_le_chiavi(esito) & CHIAVI_VIETATE_APP, set())
+
+    def test_json_serializzabile_senza_nan(self):
+        casi = [
+            _esegui_list_installed_applications(RisultatoApplicazioni([_app("Chrome")], 0))[0],
+            _esegui_list_installed_applications(RisultatoApplicazioni([], 0))[0],
+            _esegui_list_installed_applications(eccezione=AppPiattaformaNonSupportata("x"))[0],
+            _esegui_list_installed_applications(eccezione=RuntimeError("x"))[0],
+        ]
+        for esito in casi:
+            json.dumps(esito, allow_nan=False)
+
+
+class TestFallbackListInstalledApplications(unittest.TestCase):
+
+    def _righe(self, risultato_tool):
+        return fallback_deterministico_sistema(risultato_tool).splitlines()
+
+    def test_applicazione_completa(self):
+        righe = self._righe(_risultato_app([_app("7-Zip", "26.04", "Igor Pavlov")]))
+        self.assertEqual(righe[-1], "- 7-Zip (versione 26.04, Igor Pavlov)")
+
+    def test_applicazione_senza_versione_ne_produttore(self):
+        righe = self._righe(_risultato_app([_app("App Senza Dettagli", None, None)]))
+        self.assertEqual(righe[-1], "- App Senza Dettagli")
+
+    def test_lista_vuota_senza_filtro(self):
+        self.assertEqual(
+            fallback_deterministico_sistema(_risultato_app([])),
+            "Nessuna applicazione installata trovata nel registro di Windows.",
+        )
+
+    def test_lista_vuota_con_filtro(self):
+        testo = fallback_deterministico_sistema(_risultato_app([], filtro="nonexistent"))
+        self.assertEqual(
+            testo,
+            'Nessuna applicazione installata corrisponde al filtro "nonexistent".',
+        )
+
+    def test_lista_vuota_con_sorgenti_indisponibili_non_dichiara_assenza(self):
+        """FIX 2: vuoto + sources_unavailable>0 non è un'assenza verificata."""
+
+        testo = fallback_deterministico_sistema(
+            _risultato_app([], sorgenti_non_disponibili=1)
+        )
+        self.assertNotIn("Nessuna applicazione installata trovata", testo)
+        self.assertIn("non", testo.lower())
+
+    def test_lista_filtrata_vuota_con_sorgenti_indisponibili_non_dichiara_assenza(self):
+        testo = fallback_deterministico_sistema(
+            _risultato_app([], filtro="nonexistent", sorgenti_non_disponibili=2)
+        )
+        self.assertNotIn(
+            'Nessuna applicazione installata corrisponde al filtro "nonexistent".', testo
+        )
+        self.assertIn("nonexistent", testo)
+
+    def test_lista_vuota_con_sorgenti_disponibili_dichiara_assenza_normalmente(self):
+        """Senza sources_unavailable il messaggio categorico resta corretto (nessuna regressione)."""
+
+        testo = fallback_deterministico_sistema(
+            _risultato_app([], sorgenti_non_disponibili=0)
+        )
+        self.assertEqual(testo, "Nessuna applicazione installata trovata nel registro di Windows.")
+
+    def test_piattaforma_non_supportata(self):
+        esito, _ = _esegui_list_installed_applications(eccezione=AppPiattaformaNonSupportata("x"))
+        self.assertEqual(
+            fallback_deterministico_sistema(esito),
+            "L'elenco delle applicazioni installate è disponibile solo su Windows.",
+        )
+
+    def test_errore_globale(self):
+        esito, _ = _esegui_list_installed_applications(eccezione=RuntimeError("x"))
+        self.assertEqual(
+            fallback_deterministico_sistema(esito),
+            "Non sono riuscito a leggere l'elenco delle applicazioni installate.",
+        )
+
+    def test_troncato(self):
+        app = [_app(f"App{i:02d}") for i in range(50)]
+        righe = self._righe(_risultato_app(app, totale=60, troncato=True))
+
+        self.assertEqual(righe[0], "Applicazioni installate secondo il registro di Windows: 60 "
+                                    "(elenco non necessariamente completo: non copre app Microsoft "
+                                    "Store/UWP né programmi portatili)")
+        self.assertEqual(righe[-1], "Elenco parziale: mostrate 50 applicazioni su 60.")
+
+    def test_non_troncato_senza_frase_parziale(self):
+        testo = fallback_deterministico_sistema(_risultato_app([_app("Chrome")]))
+        self.assertNotIn("parziale", testo)
+
+    def test_sources_unavailable_aggiunge_avviso(self):
+        testo = fallback_deterministico_sistema(
+            _risultato_app([_app("Chrome")], sorgenti_non_disponibili=1)
+        )
+        self.assertIn("incompleto", testo)
+
+    def test_sources_disponibili_nessun_avviso(self):
+        testo = fallback_deterministico_sistema(
+            _risultato_app([_app("Chrome")], sorgenti_non_disponibili=0)
+        )
+        self.assertNotIn("incompleto", testo)
+
+    def test_con_filtro_intestazione_diversa(self):
+        righe = self._righe(_risultato_app([_app("Chrome")], filtro="chrome"))
+        self.assertEqual(righe[0], 'Applicazioni corrispondenti al filtro "chrome": 1')
+
+    def test_dati_malformati_mai_none_in_testo(self):
+        casi = [
+            {**_app("X"), "version": 123},
+            {**_app("X"), "publisher": True},
+            {**_app("X"), "name": None},
+            "non un dict",
+        ]
+        for applicazione in casi:
+            with self.subTest(applicazione=applicazione):
+                testo = fallback_deterministico_sistema(_risultato_app([applicazione]))
+                self.assertNotIn("None", testo)
+
+    def test_data_o_applications_non_validi(self):
+        for data in (None, "x", {"applications": None}, {"applications": "x"}):
+            with self.subTest(data=data):
+                testo = fallback_deterministico_sistema(
+                    {
+                        "ok": True,
+                        "operation": "list_installed_applications",
+                        "status": "success",
+                        "data": data,
+                    }
+                )
+                self.assertEqual(testo, "Nessuna applicazione installata trovata nel registro di Windows.")
+
+    def test_router_non_usa_il_fallback_generico(self):
+        testo = fallback_deterministico_sistema(_risultato_app([_app("Chrome")]))
+        self.assertNotIn("Non sono riuscito a generare una risposta", testo)
+
+    def test_nessun_percorso_o_comando_nel_testo(self):
+        testo = fallback_deterministico_sistema(_risultato_app([_app("Chrome")]))
+        for vietato in ("C:\\", "HKEY_", "uninstall", "msiexec"):
+            self.assertNotIn(vietato, testo)
+
+
+class TestPipelinePostToolListInstalledApplications(unittest.TestCase):
+
+    def test_secondo_giro_fallito_usa_fallback_app(self):
+        risultato_tool = _risultato_app([_app("7-Zip", "26.04", "Igor Pavlov")])
+
+        def esegui_risposta_finale_fallisce(*args, **kwargs):
+            raise ConnectionError("Ollama non raggiungibile")
+
+        originale = tool_response.esegui_risposta_finale
+        tool_response.esegui_risposta_finale = esegui_risposta_finale_fallisce
+        try:
+            risposta = genera_risposta_post_tool(
+                modello="qwen3:8b",
+                messaggi=[],
+                host_ollama="http://localhost:11434",
+                timeout_ollama=60,
+                risultato_tool=risultato_tool,
+                salta_secondo_giro=False,
+                fallback_deterministico=fallback_deterministico_sistema,
+            )
+        finally:
+            tool_response.esegui_risposta_finale = originale
+
+        self.assertIn("- 7-Zip (versione 26.04, Igor Pavlov)", risposta)
 
 
 if __name__ == "__main__":
