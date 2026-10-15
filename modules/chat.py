@@ -20,6 +20,15 @@ from modules.ollama_manager import (
     esegui_risposta_finale,
     esegui_turno_con_tools,
 )
+from modules.preferences_tools import (
+    ContestoPreferenze,
+    applica_preferenza_confermata,
+    domanda_conferma_set_app_preference,
+    fallback_deterministico_preferenze,
+    registra_tool_preferenze,
+    risposta_affermativa,
+    risultato_set_app_preference_annullato,
+)
 from modules.system_tools import (
     fallback_deterministico_sistema,
     registra_tool_sistema,
@@ -698,6 +707,7 @@ def avvia_chat(
     num_ctx: int,
     stato_memoria: StatoMemoria,
     percorso_memoria: Path,
+    percorso_preferenze: Path,
     limite_ricerca: int,
     contesto_filesystem: ContestoFilesystem,
 ) -> None:
@@ -706,7 +716,11 @@ def avvia_chat(
 
     contesto_filesystem arriva già preparato dal chiamante (root
     autorizzate risolte rispetto ad app_root): avvia_chat non legge la
-    configurazione e non conosce i percorsi runtime.
+    configurazione e non conosce i percorsi runtime. percorso_preferenze
+    è il solo percorso di DATA_ROOT/app_preferences.json: a differenza
+    della memoria, le preferenze applicative non hanno uno stato di
+    sessione né una modalità (nessun inizializza_preferenze a monte);
+    ogni lettura/scrittura avviene direttamente sul file.
     """
 
     messaggi = [
@@ -721,12 +735,17 @@ def avvia_chat(
     registro_strumenti = crea_registro_memoria()
     registra_tool_sistema(registro_strumenti)
     registra_tool_filesystem(registro_strumenti)
+    registra_tool_preferenze(registro_strumenti)
 
     contesto_strumenti = ContestoMemoria(
         stato_memoria=stato_memoria,
         stato_sessione=stato_sessione,
         percorso_memoria=percorso_memoria,
         limite_ricerca=limite_ricerca,
+    )
+
+    contesto_preferenze = ContestoPreferenze(
+        percorso_preferenze=percorso_preferenze,
     )
 
     while True:
@@ -963,10 +982,14 @@ def avvia_chat(
 
             # Il registry inoltra un contesto opaco all'handler: per il
             # dominio filesystem serve quello con le root autorizzate,
-            # non lo stato memoria (che gli handler filesystem non
-            # userebbero comunque).
+            # per il dominio preferences quello col percorso del file
+            # preferenze; gli altri domini (memory, system) continuano
+            # a ricevere lo stato memoria, che gli handler system non
+            # usano comunque.
             if dominio_tool == "filesystem":
                 contesto_dispatch = contesto_filesystem
+            elif dominio_tool == "preferences":
+                contesto_dispatch = contesto_preferenze
             else:
                 contesto_dispatch = contesto_strumenti
 
@@ -1006,6 +1029,79 @@ def avvia_chat(
             )
 
             # -------------------------------------------------
+            # CONFERMA PYTHON PRIMA DI SCRIVERE UNA PREFERENZA
+            # -------------------------------------------------
+            # set_app_preference non scrive mai da solo (vedi
+            # modules/preferences_tools.py): restituisce solo una
+            # proposta. Qui, e solo qui, Python presenta una domanda
+            # sì/no diretta all'utente tramite input(), SENZA
+            # coinvolgere il modello e senza un secondo giro Ollama.
+            # La proposta non sopravvive oltre questo blocco: non
+            # viene mai salvata in stato_sessione né altrove, quindi
+            # non può restare residua né essere confusa con un
+            # eventuale pending di memoria (quello si legge/risolve
+            # solo sul turno utente successivo, tramite il modello;
+            # questo input() è immediato e non lascia nulla in sospeso
+            # al termine del blocco).
+            if (
+                nome_tool == "set_app_preference"
+                and risultato_tool.get("status") == "pending_confirmation"
+            ):
+                dati_proposta = risultato_tool.get("data")
+                dati_proposta = dati_proposta if isinstance(dati_proposta, dict) else {}
+                categoria_proposta = dati_proposta.get("category")
+                valore_proposta = dati_proposta.get("value")
+
+                print(
+                    "\nAster: "
+                    + domanda_conferma_set_app_preference(
+                        categoria_proposta, valore_proposta
+                    )
+                )
+
+                try:
+                    risposta_utente = input("\nTu: ")
+                except (KeyboardInterrupt, EOFError):
+                    # Annulla senza scrivere, senza propagare al
+                    # rollback dell'intero turno: la tool call e il suo
+                    # risultato (pending_confirmation) restano in
+                    # cronologia così come sono realmente avvenuti.
+                    risposta_utente = ""
+
+                if risposta_affermativa(risposta_utente):
+                    risultato_conferma = applica_preferenza_confermata(
+                        categoria_proposta,
+                        valore_proposta,
+                        contesto_preferenze,
+                    )
+                else:
+                    risultato_conferma = risultato_set_app_preference_annullato(
+                        categoria_proposta, valore_proposta
+                    )
+
+                risposta_completa = fallback_deterministico_preferenze(
+                    risultato_conferma
+                )
+
+                print(
+                    f"\nAster: {risposta_completa}"
+                )
+
+                messaggi.append(
+                    {
+                        "role": "assistant",
+                        "content": risposta_completa,
+                    }
+                )
+
+                limita_cronologia(
+                    messaggi,
+                    max_messaggi,
+                )
+
+                continue
+
+            # -------------------------------------------------
             # RISPOSTA FINALE DOPO IL TOOL
             # -------------------------------------------------
 
@@ -1031,6 +1127,9 @@ def avvia_chat(
                     risultato_tool.get("status") == "sensitive_file"
                 )
                 fallback_deterministico = fallback_deterministico_file
+            elif dominio_tool == "preferences":
+                salta_secondo_giro = False
+                fallback_deterministico = fallback_deterministico_preferenze
             else:
                 salta_secondo_giro = False
                 fallback_deterministico = _fallback_minimo_dominio_sconosciuto

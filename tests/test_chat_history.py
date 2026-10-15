@@ -916,6 +916,7 @@ class TestRollbackTurno(unittest.TestCase):
         self._patch(chat, "crea_registro_memoria", _registro_di_test)
         self._patch(chat, "registra_tool_sistema", lambda registro: None)
         self._patch(chat, "registra_tool_filesystem", lambda registro: None)
+        self._patch(chat, "registra_tool_preferenze", lambda registro: None)
 
     def tearDown(self):
         for (modulo, nome), valore in self._originali.items():
@@ -949,7 +950,7 @@ class TestRollbackTurno(unittest.TestCase):
                     "prompt di sistema", "qwen3:8b", LIMITE,
                     "http://localhost:11434", 60, 8192,
                     StatoMemoria(modalita=MODALITA_NORMALE, memoria=None),
-                    self.tmp / "memory.json", 5,
+                    self.tmp / "memory.json", self.tmp / "app_preferences.json", 5,
                     ContestoFilesystem(allowed_roots=[], reserved_roots=()),
                 )
         finally:
@@ -1122,6 +1123,7 @@ class TestAvviaChatSenzaConfig(unittest.TestCase):
             mock.patch.object(chat, "crea_registro_memoria", registro_filesystem),
             mock.patch.object(chat, "registra_tool_sistema", lambda registro: None),
             mock.patch.object(chat, "registra_tool_filesystem", lambda registro: None),
+            mock.patch.object(chat, "registra_tool_preferenze", lambda registro: None),
             mock.patch.object(chat, "esegui_turno_con_tools", lambda *a: next(risposte)),
             mock.patch.object(chat, "genera_risposta_post_tool", lambda **kw: "Fatto."),
             mock.patch.object(modulo_config, "carica_config", vietato),
@@ -1140,7 +1142,7 @@ class TestAvviaChatSenzaConfig(unittest.TestCase):
                 "prompt di sistema", "qwen3:8b", LIMITE,
                 "http://localhost:11434", 60, 8192,
                 StatoMemoria(modalita=MODALITA_NORMALE, memoria=None),
-                tmp / "memory.json", 5,
+                tmp / "memory.json", tmp / "app_preferences.json", 5,
                 contesto_ricevuto,
             )
 

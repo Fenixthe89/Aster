@@ -78,6 +78,10 @@ class PercorsiRuntime:
     def memory_file(self) -> PurePath:
         return self.data_root / "memory.json"
 
+    @property
+    def preferences_file(self) -> PurePath:
+        return self.data_root / "app_preferences.json"
+
 
 # =====================================================================
 # Parte pura: nessuna I/O, nessun accesso a sys/os

@@ -62,6 +62,8 @@ def main() -> None:
         percorso_memoria = percorsi.memory_file
         stato_memoria = inizializza_memoria(percorso_memoria)
 
+        percorso_preferenze = percorsi.preferences_file
+
         print("Controllo connessione con Ollama...")
         controlla_ollama(
         modello,
@@ -96,6 +98,7 @@ def main() -> None:
         num_ctx,
         stato_memoria,
         percorso_memoria,
+        percorso_preferenze,
         limite_ricerca,
         contesto_filesystem,
 )

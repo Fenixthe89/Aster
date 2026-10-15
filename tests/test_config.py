@@ -1114,7 +1114,7 @@ class TestAvvioAsterSingleLoad(_BaseLivelli):
         # avvia_chat riceve esattamente quel ContestoFilesystem.
         self.assertEqual(len(self.avvii_chat), 1)
         argomenti = self.avvii_chat[0]
-        self.assertEqual(len(argomenti), 10)
+        self.assertEqual(len(argomenti), 11)
         self.assertIs(argomenti[-1], contesto)
         self.assertEqual(argomenti[1], "qwen3:8b")
         self.assertEqual(argomenti[5], 16384)
